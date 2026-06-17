@@ -1,0 +1,69 @@
+[project]
+name = "svg2mpl"
+version = "0.1.0"
+description = "Render SVG files into matplotlib artists."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "tkclam", email = "thomas.lam@epfl.ch" }]
+requires-python = ">=3.10"
+keywords = ["matplotlib", "svg", "vector", "visualization", "rendering"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Matplotlib",
+    "Programming Language :: Python :: 3",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Scientific/Engineering :: Visualization",
+]
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "svgpath2mpl",
+]
+
+[project.optional-dependencies]
+# CSS <style> block support (selectors with specificity). Presentation
+# attributes and inline style="..." work without these.
+css = ["tinycss2", "cssselect2"]
+
+[project.urls]
+Repository = "https://github.com/tkclam/svg2mpl"
+Issues = "https://github.com/tkclam/svg2mpl/issues"
+
+[build-system]
+requires = ["uv_build>=0.11,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+# Default src layout: the package lives at src/svg2mpl. Ship the tests with
+# the sdist.
+source-include = ["tests/**"]
+
+[dependency-groups]
+dev = [
+    "ipykernel",
+    "pre-commit",
+    "pytest",
+    "pytest-mpl",
+    "ruff",
+    "tinycss2",
+    "cssselect2",
+]
+docs = [
+    "mkdocs-material",
+    "mkdocstrings[python]",
+    "mkdocs-jupyter",
+    "ipykernel",
+    "nbconvert",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]

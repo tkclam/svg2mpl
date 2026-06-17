@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# uv
+.venv/
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# pytest-mpl
+result_images/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# MkDocs
+site/
+.cache/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
