@@ -30,5 +30,16 @@ jobs:
           uv run ruff check
           uv run ruff format --check
 
-      - name: Run tests
-        run: uv run pytest
+      - name: Type check
+        run: uv run pyright
+
+      - name: Run tests (with image comparison)
+        run: uv run pytest --mpl --mpl-results-path=result_images
+
+      - name: Upload image comparison results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mpl-results-${{ matrix.python-version }}
+          path: result_images
+          if-no-files-found: ignore

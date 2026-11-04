@@ -1,9 +1,5 @@
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from matplotlib.collections import PathCollection
@@ -13,13 +9,6 @@ import svg2mpl
 from svg2mpl.render import get_affine_matrix, get_bbox, get_is_included
 
 ASSET = Path(__file__).parent / "assets" / "basic.svg"
-
-
-@pytest.fixture
-def ax():
-    fig, ax = plt.subplots()
-    yield ax
-    plt.close(fig)
 
 
 def test_load_is_cached():
@@ -51,7 +40,7 @@ def test_exclude_drops_paths(ax):
 
 
 def test_exclude_everything_raises(ax):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="all were excluded"):
         svg2mpl.add_svg(ASSET, ax=ax, exclude=r".*")
 
 
@@ -108,7 +97,7 @@ def test_placement_positions_anchor(ax):
 
 # --- helper unit tests ---------------------------------------------------- #
 def test_get_bbox_empty_raises():
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="empty collection"):
         get_bbox([])
 
 

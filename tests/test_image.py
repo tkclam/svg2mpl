@@ -8,9 +8,6 @@ are still built (smoke test) but not compared. Regenerate baselines with::
 
 from pathlib import Path
 
-import matplotlib
-
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pytest
 

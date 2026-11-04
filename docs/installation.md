@@ -40,8 +40,20 @@ cd svg2mpl
 uv sync --extra css
 ```
 
+The checks CI runs:
+
+```bash
+uv run ruff check && uv run ruff format --check   # lint and formatting
+uv run pyright                                    # type checking
+uv run pytest --mpl                               # tests incl. image comparison
+```
+
+Regenerate the reference images after an intended rendering change with
+`uv run pytest --mpl-generate-path=tests/baseline`. `pre-commit install` runs
+ruff and keeps `uv.lock` in sync on every commit.
+
 To build the documentation locally, sync the `docs` dependency group and serve
-it with live reload:
+it with live reload (the example notebooks are executed during the build):
 
 ```bash
 uv sync --group docs --extra css

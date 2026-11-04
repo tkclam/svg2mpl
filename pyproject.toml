@@ -48,6 +48,7 @@ dev = [
     "ruff",
     "tinycss2",
     "cssselect2",
+    "pyright>=1.1.414",
 ]
 docs = [
     "mkdocs-material",
@@ -101,7 +102,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]  # pytest uses bare asserts
+"tests/**" = ["S101", "E501"]  # bare asserts; long inline SVG snippets
 "docs/**" = ["S101", "E501"]
 
 [tool.pyright]

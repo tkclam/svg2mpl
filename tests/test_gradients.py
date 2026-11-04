@@ -1,11 +1,8 @@
-import matplotlib
-
-matplotlib.use("Agg")
 from xml.etree import ElementTree as ET
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
+from matplotlib.transforms import Bbox
 
 import svg2mpl
 from svg2mpl.gradients import parse_gradients
@@ -25,13 +22,6 @@ LINEAR = """<svg xmlns="http://www.w3.org/2000/svg"
   </defs>
   <rect id="r" x="0" y="0" width="10" height="10" fill="url(#ref)"/>
 </svg>"""
-
-
-@pytest.fixture
-def ax():
-    fig, ax = plt.subplots()
-    yield ax
-    plt.close(fig)
 
 
 def test_parse_collects_gradients():
@@ -59,8 +49,6 @@ def test_color_at_interpolates():
 
 def test_render_image_shape_and_endpoints():
     grads = parse_gradients(ET.fromstring(LINEAR))
-    from matplotlib.transforms import Bbox
-
     img = grads["base"].render_image(Bbox([[0, 0], [1, 1]]), res=16)
     assert img.shape == (16, 16, 4)
     # default linear gradient runs left->right: left dark, right light
@@ -69,8 +57,6 @@ def test_render_image_shape_and_endpoints():
 
 def test_radial_opacity_fades_outward():
     grads = parse_gradients(ET.fromstring(LINEAR))
-    from matplotlib.transforms import Bbox
-
     img = grads["rad"].render_image(Bbox([[0, 0], [1, 1]]), res=32)
     center = img[16, 16, 3]
     corner = img[0, 0, 3]

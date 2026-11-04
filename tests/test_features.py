@@ -3,16 +3,14 @@
 import base64
 import io
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from matplotlib.colors import to_rgba
+from PIL import Image as PILImage
 
 import svg2mpl
-from svg2mpl.geometry import path_extents
+import svg2mpl.css as css
+from svg2mpl.geometry import flatten, path_extents
 from svg2mpl.scene import Group, Image
 
 NS = 'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"'
@@ -32,8 +30,6 @@ def ext(item):
 
 def winding(path, pt):
     """Nonzero winding number of ``pt`` (what matplotlib fills with)."""
-    from svg2mpl.geometry import flatten
-
     total = 0
     for ring in flatten(path):
         x, y = ring[:, 0] - pt[0], ring[:, 1] - pt[1]
@@ -43,13 +39,6 @@ def winding(path, pt):
         cross = x * y2 - x2 * y
         total += int(np.sum(up & (cross > 0)) - np.sum(down & (cross < 0)))
     return total
-
-
-@pytest.fixture
-def ax():
-    fig, ax = plt.subplots()
-    yield ax
-    plt.close(fig)
 
 
 # --- structure ---------------------------------------------------------- #
@@ -145,7 +134,8 @@ def test_group_opacity_with_overlap_composites():
     sc = scene(
         '<g opacity="0.5"><rect width="10" height="10"/><rect x="5" width="10" height="10"/></g>'
     )
-    assert len(sc.items) == 1 and isinstance(sc.items[0], Group)
+    assert len(sc.items) == 1
+    assert isinstance(sc.items[0], Group)
     assert sc.items[0].opacity == 0.5
     assert all(s.kwargs["alpha"] == 1.0 for s in sc.items[0].items)
 
@@ -159,7 +149,8 @@ def test_stroke_width_scales_with_transform():
         '<g transform="scale(3)"><rect width="1" height="1" stroke="red" stroke-width="2"'
         ' vector-effect="non-scaling-stroke"/></g>'
     )
-    assert n.kwargs["linewidth"] == pytest.approx(2) and not n.scale_stroke
+    assert n.kwargs["linewidth"] == pytest.approx(2)
+    assert not n.scale_stroke
 
 
 def test_units_and_percentages_in_geometry():
@@ -172,8 +163,10 @@ def test_paint_order_stroke_first():
         '<rect width="5" height="5" fill="red" stroke="blue" paint-order="stroke"/>'
     )
     first, second = sc.shapes
-    assert first.kwargs["facecolor"] == "none" and first.kwargs["edgecolor"] == "blue"
-    assert second.kwargs["edgecolor"] == "none" and second.kwargs["facecolor"] == "red"
+    assert first.kwargs["facecolor"] == "none"
+    assert first.kwargs["edgecolor"] == "blue"
+    assert second.kwargs["edgecolor"] == "none"
+    assert second.kwargs["facecolor"] == "red"
 
 
 def test_evenodd_fill_rule():
@@ -213,7 +206,8 @@ def test_non_convex_nested_clips_use_offscreen_group():
         '<g clip-path="url(#a)"><rect width="100" height="100" clip-path="url(#b)"/></g>'
     )
     assert isinstance(sc.items[0], Group)
-    assert sc.items[0].clip is not None and sc.items[0].items[0].clip is not None
+    assert sc.items[0].clip is not None
+    assert sc.items[0].items[0].clip is not None
 
 
 def test_mask_and_filter_create_groups():
@@ -224,9 +218,11 @@ def test_mask_and_filter_create_groups():
         '<circle cx="50" cy="50" r="10" filter="url(#f)"/>'
     )
     m, f = sc.items
-    assert isinstance(m, Group) and m.mask is not None
+    assert isinstance(m, Group)
+    assert m.mask is not None
     assert m.region == pytest.approx((-10, -10, 110, 110))
-    assert isinstance(f, Group) and f.filter is not None
+    assert isinstance(f, Group)
+    assert f.filter is not None
     assert f.filter.primitives[0]["std"] == pytest.approx((2, 2))
 
 
@@ -244,7 +240,7 @@ def test_markers_placed_and_oriented():
         '<polyline points="0,0 10,0 10,10" fill="none" stroke="black"'
         ' marker-start="url(#m)" marker-mid="url(#m)" marker-end="url(#m)"/>'
     )
-    line, *marks = sc.shapes
+    _line, *marks = sc.shapes
     assert len(marks) == 3
     # The end marker is rotated 90 degrees at (10, 10).
     assert ext(marks[2]) == pytest.approx((9, 10, 10, 12))
@@ -285,7 +281,8 @@ def test_single_stop_gradient_is_solid():
     s = shape(
         '<linearGradient id="g"><stop stop-color="lime"/></linearGradient><rect width="1" height="1" fill="url(#g)"/>'
     )
-    assert s.fill_paint is None and to_rgba(s.kwargs["facecolor"])[:3] == (0, 1, 0)
+    assert s.fill_paint is None
+    assert to_rgba(s.kwargs["facecolor"])[:3] == (0, 1, 0)
 
 
 def test_pattern_tile_resolved():
@@ -306,9 +303,11 @@ def test_text_becomes_glyph_shapes():
     )
     assert [t.content for t in sc.texts] == ["Hi you"]
     navy, red = sc.shapes
-    assert navy.kwargs["facecolor"] == "navy" and red.kwargs["facecolor"] == "red"
-    x0, y0, x1, y1 = ext(navy)
-    assert x0 >= 10 and y1 <= 51  # glyphs sit on the baseline
+    assert navy.kwargs["facecolor"] == "navy"
+    assert red.kwargs["facecolor"] == "red"
+    x0, _y0, x1, y1 = ext(navy)
+    assert x0 >= 10
+    assert y1 <= 51
     assert ext(red)[0] > x1  # the tspan continues after "Hi "
 
 
@@ -318,7 +317,8 @@ def test_text_anchor_and_positions():
         shape('<text x="50" y="50" font-size="10" text-anchor="middle">abc</text>')
     )
     end = ext(shape('<text x="50" y="50" font-size="10" text-anchor="end">abc</text>'))
-    assert start[0] >= 50 and end[2] <= 50.5
+    assert start[0] >= 50
+    assert end[2] <= 50.5
     assert (middle[0] + middle[2]) / 2 == pytest.approx(50, abs=1)
 
 
@@ -338,8 +338,6 @@ def test_text_path():
 
 # --- images --------------------------------------------------------------- #
 def _png_uri():
-    from PIL import Image as PILImage
-
     buf = io.BytesIO()
     PILImage.fromarray(np.full((2, 4, 4), 255, np.uint8)).save(buf, "PNG")
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
@@ -348,7 +346,8 @@ def _png_uri():
 def test_raster_image_placed_with_aspect_ratio():
     sc = scene(f'<image x="0" y="0" width="40" height="40" href="{_png_uri()}"/>')
     img = sc.items[0]
-    assert isinstance(img, Image) and img.data.shape == (2, 4, 4)
+    assert isinstance(img, Image)
+    assert img.data.shape == (2, 4, 4)
     assert ext(img) == pytest.approx((0, 10, 40, 30))  # 2:1 image, meet
 
 
@@ -371,8 +370,6 @@ def test_css_important_beats_inline():
 
 
 def test_builtin_css_fallback(monkeypatch):
-    import svg2mpl.css as css
-
     monkeypatch.setattr(css, "css_available", lambda: False)
     sc = scene(
         "<style>.a{fill:red} g > .b{fill:green} #c{fill:blue} rect[data-x]{stroke:black}</style>"
@@ -382,7 +379,8 @@ def test_builtin_css_fallback(monkeypatch):
     a, b, c = sc.shapes
     assert a.kwargs["facecolor"] == "red"
     assert b.kwargs["facecolor"] == "green"
-    assert c.kwargs["facecolor"] == "blue" and c.kwargs["edgecolor"] == "black"
+    assert c.kwargs["facecolor"] == "blue"
+    assert c.kwargs["edgecolor"] == "black"
 
 
 # --- rendering ------------------------------------------------------------ #

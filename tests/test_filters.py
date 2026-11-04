@@ -9,7 +9,7 @@ REGION = (0.0, 0.0, 10.0, 10.0)
 
 def run(prims, img, space="sRGB"):
     flt = Filter(primitives=prims, region=REGION, color_space=space)
-    return apply_filter(flt, img, REGION, 2.0, 2.0, lambda *a: np.zeros(img.shape))
+    return apply_filter(flt, img, REGION, 2.0, 2.0, lambda *_: np.zeros(img.shape))
 
 
 def square():
@@ -24,20 +24,22 @@ def test_blur_preserves_mass():
     out = gaussian_blur(img, 2.0, 2.0)
     assert out[..., 3].sum() == pytest.approx(img[..., 3].sum(), rel=1e-6)
     edge = out[30, 23:28, 3]
-    assert np.all(np.diff(edge) > 0) and 0 < edge[0] < edge[-1] < 1
+    assert np.all(np.diff(edge) > 0)
+    assert 0 < edge[0] < edge[-1] < 1
 
 
 def test_offset_moves_pixels():
     out = run([{"type": "feOffset", "offset": (1.0, 0.0)}], square())
     # 1 document unit = 2 pixels to the right
-    assert out[10, 6, 3] == 0 and out[10, 16, 3] == 1
+    assert out[10, 6, 3] == 0
+    assert out[10, 16, 3] == 1
 
 
 def test_saturate_zero_is_gray():
     out = run(
         [{"type": "feColorMatrix", "mtype": "saturate", "values": [0.0]}], square()
     )
-    r, g, b, a = out[10, 10]
+    r, g, b, _alpha = out[10, 10]
     assert r == pytest.approx(g) == pytest.approx(b)
 
 

@@ -79,7 +79,7 @@ def test_intersect_with_convex():
 
 def test_intersect_two_nonconvex_raises():
     star = parse_path("M0 0 L10 0 L5 2 L10 10 L0 10 Z")
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="non-convex"):
         intersect_clip(star, star)
 
 
