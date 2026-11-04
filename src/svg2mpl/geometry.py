@@ -14,6 +14,7 @@ clip path per artist. This module bridges both gaps:
 from __future__ import annotations
 
 import contextlib
+import itertools
 import math
 from collections.abc import Iterable
 
@@ -25,11 +26,13 @@ __all__ = [
     "Rect",
     "area_scale",
     "axis_scales",
+    "codes_of",
     "empty_path",
     "evenodd_to_nonzero",
     "flatten",
     "intersect_clip",
     "is_convex",
+    "is_empty",
     "join_paths",
     "normalize_orientation",
     "path_extents",
@@ -42,13 +45,19 @@ __all__ = [
     "split_subpaths",
     "transform_rect",
     "transform_vector",
+    "vertices_of",
 ]
 
 Rect = tuple[float, float, float, float]
 """An axis-aligned rectangle ``(x0, y0, x1, y1)``."""
 
 _EXTENTS_CACHE = "_svg2mpl_extents"
-_SEG_LEN = {Path.MOVETO: 1, Path.LINETO: 1, Path.CURVE3: 2, Path.CURVE4: 3}
+_SEG_LEN: dict[int, int] = {
+    int(Path.MOVETO): 1,
+    int(Path.LINETO): 1,
+    int(Path.CURVE3): 2,
+    int(Path.CURVE4): 3,
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -110,6 +119,21 @@ def transform_vector(affine: Affine2D, dx: float, dy: float) -> tuple[float, flo
 # --------------------------------------------------------------------------- #
 # Paths
 # --------------------------------------------------------------------------- #
+def vertices_of(path: Path) -> np.ndarray:
+    """A path's vertices as an ``(n, 2)`` float array."""
+    return np.asarray(path.vertices, dtype=float)
+
+
+def codes_of(path: Path) -> np.ndarray | None:
+    """A path's codes as an array (``None`` for a plain polyline)."""
+    return None if path.codes is None else np.asarray(path.codes)
+
+
+def is_empty(path: Path | None) -> bool:
+    """Whether a path is missing or has no vertices."""
+    return path is None or len(np.asarray(path.vertices)) == 0
+
+
 def empty_path() -> Path:
     """A vertex-less path (shape ``(0, 2)``), used for degenerate shapes.
 
@@ -128,12 +152,12 @@ def rect_path(x0: float, y0: float, x1: float, y1: float) -> Path:
 
 def join_paths(paths: Iterable[Path | None]) -> Path:
     """Concatenate paths into one compound path (empty paths are skipped)."""
-    paths = [p for p in paths if p is not None and len(p.vertices)]
-    if not paths:
+    kept = [p for p in paths if p is not None and not is_empty(p)]
+    if not kept:
         return empty_path()
-    if len(paths) == 1:
-        return paths[0]
-    return Path.make_compound_path(*paths)
+    if len(kept) == 1:
+        return kept[0]
+    return Path.make_compound_path(*kept)
 
 
 def _curve_extrema(p: np.ndarray) -> np.ndarray:
@@ -189,19 +213,19 @@ def _curve_extrema(p: np.ndarray) -> np.ndarray:
     return np.concatenate(out)
 
 
-def path_extents(path: Path):
+def path_extents(path: Path | None) -> Rect | None:
     """Exact bounding box ``(x0, y0, x1, y1)`` of a path, or ``None`` if empty.
 
     A vectorized replacement for ``Path.get_extents`` (which evaluates curve
     extrema segment by segment and dominates parse time on large drawings).
     """
-    if path is None or len(path.vertices) == 0:
+    if path is None or is_empty(path):
         return None
     cached = getattr(path, _EXTENTS_CACHE, None)
     if cached is not None:
         return cached
-    verts = np.asarray(path.vertices, float)
-    codes = path.codes
+    verts = vertices_of(path)
+    codes = codes_of(path)
     if codes is None:
         pts = verts
     else:
@@ -236,16 +260,16 @@ def path_extents(path: Path):
 
 def split_subpaths(path: Path) -> list[Path]:
     """Split a path into its subpaths (each starting with a ``MOVETO``)."""
-    verts = path.vertices
-    codes = path.codes
+    verts = vertices_of(path)
+    codes = codes_of(path)
     if codes is None:
         return [path] if len(verts) else []
     starts = list(np.flatnonzero(codes == Path.MOVETO))
     if not starts or starts[0] != 0:
-        starts = [0] + starts
-    bounds = starts + [len(verts)]
+        starts = [0, *starts]
+    bounds = [*starts, len(verts)]
     out = []
-    for a, b in zip(bounds[:-1], bounds[1:], strict=False):
+    for a, b in itertools.pairwise(bounds):
         if b > a:
             out.append(Path(verts[a:b], codes[a:b]))
     return out
@@ -270,8 +294,8 @@ def flatten(path: Path, tolerance: float | None = None) -> list[np.ndarray]:
     Every subpath is treated as closed (as for filling). ``tolerance`` is an
     approximate chord deviation; by default it scales with the path size.
     """
-    verts = path.vertices
-    codes = path.codes
+    verts = vertices_of(path)
+    codes = codes_of(path)
     if len(verts) == 0:
         return []
     if codes is None:
@@ -331,8 +355,10 @@ def _point_in_ring(pt, ring: np.ndarray) -> bool:
 
 def _reverse_subpath(sub: Path) -> Path:
     """Reverse a subpath's direction, keeping curve segments intact."""
-    verts = sub.vertices
-    codes = sub.codes if sub.codes is not None else np.full(len(verts), Path.LINETO)
+    verts = vertices_of(sub)
+    codes = codes_of(sub)
+    if codes is None:
+        codes = np.full(len(verts), Path.LINETO)
     closed = codes[-1] == Path.CLOSEPOLY
     if closed:
         verts, codes = verts[:-1], codes[:-1]
@@ -351,7 +377,7 @@ def _reverse_subpath(sub: Path) -> Path:
         start = pts[j]
         if code in (Path.CURVE3, Path.CURVE4):
             ctrl = list(seg[:-1])[::-1]
-            new_v.extend(ctrl + [start])
+            new_v.extend([*ctrl, start])
             new_c.extend([code] * (len(ctrl) + 1))
         else:
             new_v.append(start)
@@ -468,8 +494,8 @@ def _clip_path_by_convex(subject: Path, convex: Path) -> Path:
     if _signed_area(ring) < 0:
         ring = ring[::-1]
     pieces = []
-    for r in flatten(subject):
-        r = _dedupe(r)
+    for raw in flatten(subject):
+        r = _dedupe(raw)
         if len(r) < 3:
             continue
         c = _clip_ring(r, ring)

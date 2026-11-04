@@ -17,7 +17,6 @@ joints introduced by arc conversion.
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -25,20 +24,28 @@ import numpy as np
 from matplotlib.path import Path
 
 from .geometry import empty_path
+from .units import NUMBER_RE
 
 __all__ = [
     "ParsedPath",
     "Subpath",
     "empty_path",
+    "marker_vertices",
     "parse_path",
     "parse_path_data",
     "polyline_path_data",
-    "marker_vertices",
 ]
 
-_NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 _WS = " \t\r\n\f,"
 _ARGC = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7}
+
+
+Point = tuple[float, float]
+Direction = tuple[float, float]  # a unit vector
+
+# Path codes as plain ints (matplotlib defines them as numpy uint8).
+_MOVETO, _LINETO = int(Path.MOVETO), int(Path.LINETO)
+_CURVE3, _CURVE4, _CLOSEPOLY = int(Path.CURVE3), int(Path.CURVE4), int(Path.CLOSEPOLY)
 
 
 @dataclass
@@ -47,7 +54,7 @@ class Subpath:
 
     start: tuple[float, float]
     # (end_point, direction_at_segment_start, direction_at_segment_end)
-    segments: list[tuple[tuple[float, float], tuple, tuple]] = field(
+    segments: list[tuple[Point, Direction | None, Direction | None]] = field(
         default_factory=list
     )
     closed: bool = False
@@ -85,7 +92,7 @@ class _Scanner:
 
     def number(self) -> float:
         self.skip()
-        m = _NUM_RE.match(self.s, self.i)
+        m = NUMBER_RE.match(self.s, self.i)
         if not m:
             raise ValueError("expected number")
         self.i = m.end()
@@ -107,7 +114,7 @@ class _Scanner:
 
     def has_number(self) -> bool:
         self.skip()
-        return self.i < self.n and _NUM_RE.match(self.s, self.i) is not None
+        return self.i < self.n and NUMBER_RE.match(self.s, self.i) is not None
 
 
 def _unit(dx: float, dy: float):
@@ -198,7 +205,7 @@ class _Builder:
 
     def move(self, p):
         self.verts.append(p)
-        self.codes.append(Path.MOVETO)
+        self.codes.append(_MOVETO)
         self.cur = self.start = p
         self.subpaths.append(Subpath(start=p))
         self.need_move = False
@@ -212,7 +219,7 @@ class _Builder:
         p0 = self.cur
         d = _unit(p[0] - p0[0], p[1] - p0[1])
         self.verts.append(p)
-        self.codes.append(Path.LINETO)
+        self.codes.append(_LINETO)
         self.subpaths[-1].segments.append((p, d, d))
         self.cur = p
 
@@ -220,7 +227,7 @@ class _Builder:
         self._ensure()
         p0 = self.cur
         self.verts += [c, p]
-        self.codes += [Path.CURVE3, Path.CURVE3]
+        self.codes += [_CURVE3, _CURVE3]
         self.subpaths[-1].segments.append(
             (p, _first_dir(p0, c, p), _last_dir(p, c, p0))
         )
@@ -230,7 +237,7 @@ class _Builder:
         self._ensure()
         p0 = self.cur
         self.verts += [c1, c2, p]
-        self.codes += [Path.CURVE4] * 3
+        self.codes += [_CURVE4] * 3
         if record:
             self.subpaths[-1].segments.append(
                 (p, _first_dir(p0, c1, c2, p), _last_dir(p, c2, c1, p0))
@@ -259,7 +266,7 @@ class _Builder:
         p0, s = self.cur, self.start
         d = _unit(s[0] - p0[0], s[1] - p0[1])
         self.verts.append(s)
-        self.codes.append(Path.CLOSEPOLY)
+        self.codes.append(_CLOSEPOLY)
         sub = self.subpaths[-1]
         sub.segments.append((s, d, d))
         sub.closed = True
@@ -410,7 +417,8 @@ def marker_vertices(parsed: ParsedPath) -> list[tuple[float, float, float, str]]
     """Return ``(x, y, auto_angle_deg, role)`` for each path vertex.
 
     ``role`` is ``"start"`` for the very first vertex, ``"end"`` for the last,
-    ``"both"`` for a single-vertex path and ``"mid"`` otherwise, matching ``marker-start``/``marker-mid``/``marker-end``.
+    ``"both"`` for a single-vertex path and ``"mid"`` otherwise, matching
+    ``marker-start``/``marker-mid``/``marker-end``.
     The ``auto`` angle is the bisector of the incoming and outgoing directions.
     """
     out: list[tuple[float, float, float, str]] = []

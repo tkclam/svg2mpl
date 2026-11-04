@@ -11,10 +11,10 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import pytest  # noqa: E402
+import matplotlib.pyplot as plt
+import pytest
 
-import svg2mpl  # noqa: E402
+import svg2mpl
 
 ASSET = Path(__file__).parent / "assets" / "basic.svg"
 

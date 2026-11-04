@@ -19,8 +19,8 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
-from matplotlib.path import Path
 from matplotlib.patches import PathPatch
+from matplotlib.path import Path
 from matplotlib.transforms import Affine2D, Transform
 
 from .artists import SVGLineCollection, SVGPathCollection, SVGPathPatch
@@ -31,6 +31,7 @@ from .geometry import (
     area_scale,
     flatten,
     intersect_clip,
+    is_empty,
     path_extents,
     rect_is_empty,
     split_subpaths,
@@ -257,7 +258,7 @@ class Renderer:
         """Draw ``items``; with ``collect`` patches are recorded by id."""
         for item in items:
             clip = getattr(item, "clip", None)
-            if clip is not None and len(clip.vertices) == 0:
+            if clip is not None and is_empty(clip):
                 continue
             if isinstance(item, Shape):
                 if item.text is not None and not self.opts.text_as_paths:
@@ -348,11 +349,11 @@ class Renderer:
 
     # -- paint servers ----------------------------------------------------- #
     def _paint_fill(self, shape: Shape, bound: BoundPaint) -> None:
-        region = shape.path
+        region: Path = shape.path
         clip_extra = None  # a clip that could not be merged into the outline
         if shape.clip is not None:
             try:
-                region = intersect_clip(shape.path, shape.clip)
+                region = intersect_clip(shape.path, shape.clip) or region
             except ValueError:
                 clip_extra = shape.clip
         ext = path_extents(region)
@@ -488,8 +489,7 @@ def _stroke_polylines(path: Path) -> list[np.ndarray]:
     out = []
     for sub in split_subpaths(path):
         closed = sub.codes is not None and sub.codes[-1] == Path.CLOSEPOLY
-        for ring in flatten(sub):
-            out.append(np.vstack([ring, ring[:1]]) if closed else ring)
+        out.extend(np.vstack([r, r[:1]]) if closed else r for r in flatten(sub))
     return out
 
 
@@ -571,7 +571,7 @@ def emit_collection(r: Renderer, shapes: list[Shape]) -> SVGPathCollection | Non
         else:
             dash_list = None
         collection.set_svg_stroke(
-            [e.stroke.width for e in entries],
+            [e.stroke.width or 0.0 for e in entries],
             dash_list,
             entries[0].stroke.scaled,
             _center(paths[0]),

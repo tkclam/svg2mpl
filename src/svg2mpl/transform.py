@@ -18,17 +18,17 @@ import math
 import re
 
 import numpy as np
-from matplotlib.transforms import Affine2D
+from matplotlib.transforms import Affine2D, Affine2DBase
 
 from .units import parse_numbers
 
 __all__ = [
+    "flip_y_transform",
     "parse_angles",
+    "parse_preserve_aspect_ratio",
     "parse_transform",
     "parse_viewbox",
-    "parse_preserve_aspect_ratio",
     "viewbox_transform",
-    "flip_y_transform",
 ]
 
 # One transform function, e.g. ``translate(1, 2)`` or ``matrix(1 0 0 1 0 0)``.
@@ -41,6 +41,16 @@ _FUNC_RE = re.compile(
 )
 _NUM_UNIT_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?([a-zA-Z%]*)")
 _ANGLE_UNITS = {"": 1.0, "deg": 1.0, "rad": 180.0 / math.pi, "grad": 0.9, "turn": 360.0}
+
+
+def compose(*transforms: Affine2DBase) -> Affine2D:
+    """Compose affines in application order: ``compose(a, b)`` applies ``a``
+    first, like ``a + b``, but returns one flat :class:`Affine2D` instead of a
+    lazy composite (cheaper to invert and to compose again)."""
+    matrix = np.eye(3)
+    for t in transforms:
+        matrix = t.get_matrix() @ matrix
+    return Affine2D(matrix)
 
 
 def parse_angles(text: str | None) -> list[float]:
@@ -90,13 +100,9 @@ def _func_to_affine(name: str, args: list[float]) -> Affine2D:
             return Affine2D().translate(-cx, -cy).rotate_deg(angle).translate(cx, cy)
         return Affine2D().rotate_deg(args[0])
     if name == "skewx":
-        from math import radians, tan
-
-        return Affine2D.from_values(1, 0, tan(radians(args[0])), 1, 0, 0)
+        return Affine2D.from_values(1, 0, math.tan(math.radians(args[0])), 1, 0, 0)
     if name == "skewy":
-        from math import radians, tan
-
-        return Affine2D.from_values(1, tan(radians(args[0])), 0, 1, 0, 0)
+        return Affine2D.from_values(1, math.tan(math.radians(args[0])), 0, 1, 0, 0)
     raise ValueError(f"Unknown transform function: {name!r}")
 
 
@@ -148,11 +154,12 @@ def parse_preserve_aspect_ratio(value: str | None) -> tuple[str, str]:
     tokens = value.split()
     if tokens and tokens[0] == "defer":
         tokens = tokens[1:]
-    if tokens:
-        if tokens[0] == "none" or (
-            len(tokens[0]) == 8 and tokens[0][0] == "x" and tokens[0][4] == "Y"
-        ):
-            align = tokens[0]
+    is_align = bool(tokens) and (
+        tokens[0] == "none"
+        or (len(tokens[0]) == 8 and tokens[0][0] == "x" and tokens[0][4] == "Y")
+    )
+    if is_align:
+        align = tokens[0]
     if len(tokens) > 1 and tokens[1] in ("meet", "slice"):
         mode = tokens[1]
     return align, mode

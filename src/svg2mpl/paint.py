@@ -20,7 +20,7 @@ from .geometry import Rect, area_scale, evenodd_to_nonzero, rect_is_empty
 from .gradients import Gradient, Pattern
 from .scene import BoundPaint, PatternTile, Shape, Text
 from .style import opacity, style_to_kwargs
-from .transform import viewbox_transform
+from .transform import compose, viewbox_transform
 from .units import parse_fraction, parse_length
 
 if TYPE_CHECKING:
@@ -128,7 +128,7 @@ def _bind_pattern(
     )
     for child in pat.element:
         parser.walk(child, tile_state)
-    tile_to_doc = Affine2D().translate(x, y) + pat.transform + ctm
+    tile_to_doc = compose(Affine2D().translate(x, y), pat.transform, ctm)
     tile = PatternTile(items=items, width=w, height=h, transform=tile_to_doc)
     return BoundPaint(pat, ctm, bbox_user, paint_opacity, tile=tile)
 

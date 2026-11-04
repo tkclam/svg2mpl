@@ -3,14 +3,14 @@ from pathlib import Path
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-from matplotlib.collections import PathCollection  # noqa: E402
-from matplotlib.patches import PathPatch  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import pytest
+from matplotlib.collections import PathCollection
+from matplotlib.patches import PathPatch
 
-import svg2mpl  # noqa: E402
-from svg2mpl.render import get_affine_matrix, get_bbox, get_is_included  # noqa: E402
+import svg2mpl
+from svg2mpl.render import get_affine_matrix, get_bbox, get_is_included
 
 ASSET = Path(__file__).parent / "assets" / "basic.svg"
 

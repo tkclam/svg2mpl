@@ -30,6 +30,7 @@ import itertools
 import logging
 import math
 import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -42,18 +43,25 @@ from matplotlib.transforms import Affine2D
 
 from ._xml import strip_ns
 from .color import parse_paint
-from .geometry import empty_path, flatten, join_paths, rect_path
+from .geometry import empty_path, flatten, is_empty, join_paths, rect_path
 from .style import font_size
 from .units import LengthContext, parse_length, parse_numbers, split_length
+
+try:  # private, but the same layout matplotlib's own TextPath uses
+    from matplotlib import _text_helpers
+except ImportError:  # pragma: no cover
+    _text_helpers = None
 
 try:  # matplotlib >= 3.10
     from matplotlib.ft2font import LoadFlags
 
     _NO_HINTING = LoadFlags.NO_HINTING
 except ImportError:  # pragma: no cover - older matplotlib
-    from matplotlib.ft2font import LOAD_NO_HINTING as _NO_HINTING
+    from matplotlib.ft2font import (
+        LOAD_NO_HINTING as _NO_HINTING,  # pyright: ignore[reportAttributeAccessIssue]
+    )
 
-__all__ = ["layout_text", "add_texts", "TextRun"]
+__all__ = ["TextRun", "add_texts", "layout_text"]
 
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 _ANCHOR_TO_HA = {"start": "left", "middle": "center", "end": "right"}
@@ -82,16 +90,16 @@ class TextRun:
     id: str
     style: dict
     path: Path
-    element: object = None
+    element: ET.Element | None = None
 
 
 @dataclass
 class _Char:
     ch: str
     style: dict
-    element: object
+    element: ET.Element
     entries: tuple
-    textpath: object
+    textpath: ET.Element | None
     decorations: tuple
     shift: float
     preserve: bool
@@ -110,7 +118,7 @@ class _PosEntry:
     dy: list | None = None
     rotate: list | None = None
     count: int = 0
-    element: object = None
+    element: ET.Element | None = None
     chars: list = field(default_factory=list)
 
 
@@ -218,9 +226,7 @@ def _glyph(key, ch: str) -> Path:
 def _layout_advances(font, text: str) -> list[float] | None:
     """Kerned advances from matplotlib's text layout (private API, so any
     mismatch falls back to unkerned advances)."""
-    try:
-        from matplotlib import _text_helpers
-    except ImportError:
+    if _text_helpers is None:
         return None
     items = list(_text_helpers.layout(text, font))
     if len(items) != len(text):
@@ -243,15 +249,15 @@ def _advances(key, text: str) -> tuple[float, ...]:
     kerned = _layout_advances(font, text)
     if kerned is not None:
         return tuple(kerned)
-    out = []
-    for ch in text:
-        try:
-            out.append(
-                font.load_char(ord(ch), flags=_NO_HINTING).linearHoriAdvance / 65536
-            )
-        except RuntimeError:  # glyph missing from this font
-            out.append(_REF * 0.5)
-    return tuple(out)
+    return tuple(_char_advance(font, ch) for ch in text)
+
+
+def _char_advance(font, ch: str) -> float:
+    try:
+        glyph = font.load_char(ord(ch), flags=_NO_HINTING)
+    except RuntimeError:  # glyph missing from this font
+        return _REF * 0.5
+    return glyph.linearHoriAdvance / 65536
 
 
 # --------------------------------------------------------------------------- #
@@ -401,7 +407,7 @@ class _Glyph:
     y: float
     advance: float
     chunk: int
-    on_path: object = None
+    on_path: ET.Element | None = None
 
 
 def _baseline_offset(style, key, size) -> float:
@@ -409,7 +415,7 @@ def _baseline_offset(style, key, size) -> float:
     v = style.get("alignment-baseline") or style.get("dominant-baseline") or "auto"
     v = v.strip().lower()
     m = _metrics(key)
-    if v in ("middle",):
+    if v == "middle":
         return m["xh"] * size / 2
     if v == "central":
         return (m["asc"] + m["desc"]) * size / 2
@@ -659,7 +665,7 @@ def _build_runs(element, glyphs, measures) -> list[TextRun]:
             flush()
             current = (g.char.element, g.char.style)
             pieces = []
-        if len(glyph.vertices):
+        if not is_empty(glyph):
             pieces.append(glyph.transformed(t))
     flush()
 

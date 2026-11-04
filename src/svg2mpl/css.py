@@ -17,18 +17,20 @@ import re
 from typing import Any
 
 from ._xml import strip_ns
+from .style import parse_style_attr
+
+try:  # optional: the ``css`` extra
+    import cssselect2
+    import tinycss2
+except ImportError:  # pragma: no cover - exercised when the extra is absent
+    cssselect2 = tinycss2 = None
 
 __all__ = ["compute_css_declarations", "css_available"]
 
 
 def css_available() -> bool:
     """Return whether the optional CSS dependencies are importable."""
-    try:
-        import cssselect2  # noqa: F401
-        import tinycss2  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return cssselect2 is not None and tinycss2 is not None
 
 
 def _style_texts(root) -> list[str]:
@@ -63,16 +65,15 @@ def compute_css_declarations(root) -> dict[int, dict[str, Any]]:
 # --------------------------------------------------------------------------- #
 # tinycss2 / cssselect2 backend
 # --------------------------------------------------------------------------- #
-def _parse_declarations(content) -> dict[str, str]:
-    import tinycss2
-
+def _parse_declarations(tc, content) -> dict[str, str]:
+    """``tc`` is the tinycss2 module."""
     out: dict[str, str] = {}
-    for decl in tinycss2.parse_declaration_list(
+    for decl in tc.parse_declaration_list(
         content, skip_comments=True, skip_whitespace=True
     ):
         if decl.type != "declaration":
             continue
-        value = tinycss2.serialize(decl.value).strip()
+        value = tc.serialize(decl.value).strip()
         if decl.important:
             value += " !important"
         out[decl.lower_name] = value
@@ -85,19 +86,19 @@ def _media_applies(prelude_text: str) -> bool:
 
 
 def _compute_cssselect2(root, texts) -> dict[int, dict[str, Any]]:
-    import cssselect2
-    import tinycss2
-
-    matcher = cssselect2.Matcher()
+    tc, cs = tinycss2, cssselect2
+    if tc is None or cs is None:  # css_available() was patched or lied
+        return _compute_builtin(root, texts)
+    matcher = cs.Matcher()
 
     def add_rules(rules):
         for rule in rules:
             if rule.type == "at-rule" and rule.lower_at_keyword == "media":
                 if rule.content is not None and _media_applies(
-                    tinycss2.serialize(rule.prelude)
+                    tc.serialize(rule.prelude)
                 ):
                     add_rules(
-                        tinycss2.parse_rule_list(
+                        tc.parse_rule_list(
                             rule.content, skip_comments=True, skip_whitespace=True
                         )
                     )
@@ -105,20 +106,18 @@ def _compute_cssselect2(root, texts) -> dict[int, dict[str, Any]]:
             if rule.type != "qualified-rule":
                 continue
             try:
-                selectors = cssselect2.compile_selector_list(rule.prelude)
-            except cssselect2.SelectorError:
+                selectors = cs.compile_selector_list(rule.prelude)
+            except cs.SelectorError:
                 continue
-            decls = _parse_declarations(rule.content)
+            decls = _parse_declarations(tc, rule.content)
             for selector in selectors:
                 matcher.add_selector(selector, decls)
 
     for css in texts:
-        add_rules(
-            tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
-        )
+        add_rules(tc.parse_stylesheet(css, skip_comments=True, skip_whitespace=True))
 
     result: dict[int, dict[str, Any]] = {}
-    wrapper = cssselect2.ElementWrapper.from_xml_root(root)
+    wrapper = cs.ElementWrapper.from_xml_root(root)
     for element in wrapper.iter_subtree():
         matches = matcher.match(element)
         if not matches:
@@ -270,7 +269,7 @@ def _selector_matches(parts, el, parent_of) -> bool:
 
 
 def _builtin_rules(css: str):
-    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
     css = css.replace("<![CDATA[", "").replace("]]>", "")
     i, n = 0, len(css)
     while i < n:
@@ -296,8 +295,6 @@ def _builtin_rules(css: str):
 
 
 def _compute_builtin(root, texts) -> dict[int, dict[str, Any]]:
-    from .style import parse_style_attr
-
     rules = []
     order = 0
     for css in texts:

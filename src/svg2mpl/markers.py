@@ -12,7 +12,7 @@ from ._state import State
 from .geometry import intersect_clip, rect_path
 from .pathdata import ParsedPath, marker_vertices
 from .style import opacity
-from .transform import parse_angles, parse_viewbox, viewbox_transform
+from .transform import compose, parse_angles, parse_viewbox, viewbox_transform
 from .units import LengthContext, parse_length
 
 if TYPE_CHECKING:
@@ -111,14 +111,14 @@ def _place(
         )
     )
     # Viewport space (after viewBox) -> the shape's user space -> document.
-    outer = (
+    placement = (
         Affine2D()
         .translate(-ref[0], -ref[1])
         .scale(scale)
         .rotate_deg(_orientation(marker, auto_angle, is_start))
         .translate(*vertex)
-        + ctm
     )
+    outer = compose(placement, ctm)
     clip = st.clip
     overflow = (mstyle.get("overflow") or "hidden").strip().lower()
     if overflow not in ("visible", "auto"):
@@ -126,7 +126,7 @@ def _place(
             clip = intersect_clip(clip, rect_path(0, 0, mw, mh).transformed(outer))
     marker_state = replace(
         st,
-        ctm=view + outer,
+        ctm=compose(view, outer),
         style=mstyle,
         clip=clip,
         vp=(vb[2], vb[3]) if vb else (mw, mh),

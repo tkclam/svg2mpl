@@ -13,11 +13,12 @@ import gzip
 import io
 import re
 import urllib.parse
+import xml.etree.ElementTree as ET
 from pathlib import Path as FilePath
-from xml.etree import ElementTree
-from xml.etree.ElementTree import Element
 
 import numpy as np
+from PIL import Image as PILImage
+from PIL import UnidentifiedImageError
 
 __all__ = ["ImageError", "auto_size", "load_image", "read_href"]
 
@@ -62,28 +63,24 @@ def _looks_like_svg(data: bytes, mime: str) -> bool:
     )
 
 
-def load_image(
-    href: str, base_dir: str | None
-) -> tuple[str, np.ndarray] | tuple[str, Element]:
+def load_image(href: str, base_dir: str | None) -> np.ndarray | ET.Element:
     """Decode an image reference.
 
-    Returns ``("raster", rgba_uint8_array)`` or ``("svg", xml_root)``; raises
-    :class:`ImageError` (or :class:`OSError`) when it cannot be loaded.
+    Returns an ``(h, w, 4)`` uint8 RGBA array for raster images or the XML root
+    of an SVG document; raises :class:`ImageError` (or :class:`OSError`) when
+    it cannot be loaded.
     """
-    from PIL import Image as PILImage
-    from PIL import UnidentifiedImageError
-
     data, mime = read_href(href, base_dir)
     if _looks_like_svg(data, mime):
         try:
-            return "svg", ElementTree.fromstring(data)  # noqa: S314 - local input
-        except ElementTree.ParseError:
+            return ET.fromstring(data)
+        except ET.ParseError:
             pass
     try:
         img = PILImage.open(io.BytesIO(data)).convert("RGBA")
     except (UnidentifiedImageError, OSError) as exc:
         raise ImageError(f"could not decode image: {exc}") from exc
-    return "raster", np.asarray(img)
+    return np.asarray(img)
 
 
 def auto_size(

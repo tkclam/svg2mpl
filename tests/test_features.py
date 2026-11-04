@@ -6,14 +6,14 @@ import io
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
-from matplotlib.colors import to_rgba  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import pytest
+from matplotlib.colors import to_rgba
 
-import svg2mpl  # noqa: E402
-from svg2mpl.geometry import path_extents  # noqa: E402
-from svg2mpl.scene import Group, Image  # noqa: E402
+import svg2mpl
+from svg2mpl.geometry import path_extents
+from svg2mpl.scene import Group, Image
 
 NS = 'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"'
 

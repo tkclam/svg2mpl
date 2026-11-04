@@ -15,17 +15,22 @@ is resolved by the parser and rasterized by the renderer.
 
 from __future__ import annotations
 
+import math
+import xml.etree.ElementTree as ET
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
+from matplotlib.colors import to_rgba
 from matplotlib.transforms import Affine2D
 
-from .color import parse_color
 from ._xml import href, strip_ns
+from .color import NONE, parse_color
+from .style import compute_style, declarations, opacity
 from .transform import parse_transform, parse_viewbox
-from .units import LengthContext, parse_length
+from .units import LengthContext, parse_fraction, parse_length
 
-__all__ = ["Gradient", "Pattern", "parse_gradients", "add_gradient_fill"]
+__all__ = ["Gradient", "Pattern", "parse_gradients"]
 
 _LINEAR_DEFAULTS = {"x1": "0%", "y1": "0%", "x2": "100%", "y2": "0%"}
 _RADIAL_DEFAULTS = {"cx": "50%", "cy": "50%", "r": "50%", "fr": "0%"}
@@ -35,10 +40,6 @@ _AXIS.update({"cy": "y", "fy": "y"})
 
 def _stop(element, style) -> tuple[float, tuple[float, float, float, float]]:
     """Return ``(offset, rgba)`` for a ``<stop>`` with its computed style."""
-    from matplotlib.colors import to_rgba
-
-    from .style import opacity
-
     offset = element.attrib.get("offset", style.get("offset", "0")).strip()
     try:
         off = float(offset[:-1]) / 100.0 if offset.endswith("%") else float(offset)
@@ -82,7 +83,7 @@ class Gradient:
         """Evaluate the stop ramp at parameter(s) ``t`` (spread applied)."""
         t = np.asarray(t, dtype=float)
         if not self.stops:
-            return np.zeros(t.shape + (4,))
+            return np.zeros((*t.shape, 4))
         if self.spread == "repeat":
             t = np.mod(t, 1.0)
         elif self.spread == "reflect":
@@ -90,7 +91,7 @@ class Gradient:
         offs = np.array([o for o, _ in self.stops])
         cols = np.array([c for _, c in self.stops])
         t = np.clip(t, 0.0, 1.0)
-        out = np.empty(t.shape + (4,))
+        out = np.empty((*t.shape, 4))
         for ch in range(4):
             out[..., ch] = np.interp(t, offs, cols[:, ch])
         return out
@@ -105,7 +106,7 @@ class Gradient:
         if name in self.defaults:
             return self.defaults[name]
         defaults = _LINEAR_DEFAULTS if self.kind == "linear" else _RADIAL_DEFAULTS
-        return _fraction(defaults[name])
+        return parse_fraction(defaults[name])
 
     def _param(self, pts: np.ndarray) -> np.ndarray:
         """Map gradient-space points to the ramp parameter ``t`` (NaN = no paint)."""
@@ -153,17 +154,17 @@ class Gradient:
         pts = np.asarray(user_pts, dtype=float)
         if self.units == "objectBoundingBox":
             if bbox is None:
-                return np.zeros(pts.shape[:-1] + (4,))
+                return np.zeros((*pts.shape[:-1], 4))
             x0, y0, x1, y1 = bbox
             w, h = (x1 - x0), (y1 - y0)
             if w == 0 or h == 0:
-                return np.zeros(pts.shape[:-1] + (4,))
+                return np.zeros((*pts.shape[:-1], 4))
             pts = np.stack([(pts[..., 0] - x0) / w, (pts[..., 1] - y0) / h], axis=-1)
         try:
             inv = self.transform.inverted()
-            pts = inv.transform(pts.reshape(-1, 2)).reshape(pts.shape)
-        except Exception:
-            return np.zeros(pts.shape[:-1] + (4,))
+        except np.linalg.LinAlgError:  # degenerate gradientTransform: no paint
+            return np.zeros((*pts.shape[:-1], 4))
+        pts = inv.transform(pts.reshape(-1, 2)).reshape(pts.shape)
         t = self._param(pts)
         out = self.color_at(np.nan_to_num(t, nan=0.0))
         out[np.isnan(t)] = 0.0
@@ -187,7 +188,7 @@ class Pattern:
     """A parsed ``<pattern>`` (attributes resolved through ``href`` chains)."""
 
     id: str
-    element: object  # the element whose children form the tile
+    element: ET.Element  # the element whose children form the tile
     x: str = "0"
     y: str = "0"
     width: str = "0"
@@ -203,40 +204,37 @@ class Pattern:
         return self.color
 
 
-def _fraction(value: str) -> float:
-    v = value.strip()
-    return float(v[:-1]) / 100.0 if v.endswith("%") else float(v)
-
-
 def _coords(raw: dict, units: str, ctx: LengthContext) -> dict:
+    """Resolve coordinate attributes; unparsable values are left out."""
     out = {}
     for name, val in raw.items():
-        try:
-            if units == "objectBoundingBox":
-                out[name] = _fraction(val)
-            else:
-                out[name] = parse_length(
-                    val, 0.0, axis=_AXIS.get(name, "other"), ctx=ctx
-                )
-        except ValueError:
-            continue
+        if units == "objectBoundingBox":
+            value = parse_fraction(val, math.nan)
+        else:
+            value = parse_length(val, math.nan, axis=_AXIS.get(name, "other"), ctx=ctx)
+        if not math.isnan(value):
+            out[name] = value
     return out
 
 
-def parse_gradients(root, style_of=None, ctx: LengthContext | None = None) -> dict:
+def _attribute_style(el: ET.Element) -> dict:
+    """An element's style from its own attributes only (no CSS, no cascade)."""
+    return compute_style(declarations(el.attrib), None)
+
+
+def parse_gradients(
+    root: ET.Element,
+    style_of: Callable[[ET.Element], dict] | None = None,
+    ctx: LengthContext | None = None,
+) -> dict[str, Gradient | Pattern]:
     """Parse every gradient and pattern keyed by id.
 
     Handles ``xlink:href``/``href`` inheritance of stops and attributes.
     ``style_of(element)`` returns an element's computed style (used for stop
     colors set via CSS); by default only attributes and inline styles are used.
     """
-    from .style import compute_style, declarations
-
     ctx = ctx or LengthContext()
-    if style_of is None:
-
-        def style_of(el, _parent=None):
-            return compute_style(declarations(el.attrib), None)
+    style_of = style_of or _attribute_style
 
     raw = {}
     for el in root.iter():
@@ -341,40 +339,8 @@ def _build_pattern(gid, links, first_attr, style_of) -> Pattern:
     for el in content.iter():
         if el is content or not isinstance(el.tag, str):
             continue
-        fill = style_of(el).get("fill")
-        color = parse_color(fill, default=None) if fill else None
-        if color not in (None, "none"):
+        color = parse_color(style_of(el).get("fill"), default=NONE)
+        if color != NONE:
             pattern.color = color
             break
     return pattern
-
-
-def add_gradient_fill(
-    ax, path, gradient: Gradient, *, transform=None, zorder=None, res: int = 256
-):
-    """Fill ``path`` (in ``transform`` coordinates) with ``gradient`` via an image.
-
-    The gradient is evaluated over the path's bounding box (also used as the
-    object bounding box) and clipped to the path outline. ``transform``
-    defaults to ``ax.transData``. Returns the created
-    :class:`~matplotlib.image.AxesImage`.
-    """
-    from matplotlib.patches import PathPatch
-
-    if transform is None:
-        transform = ax.transData
-    bbox = path.get_extents()
-    if bbox.width == 0 or bbox.height == 0:
-        return None
-    img = gradient.render_image(bbox, res=res)
-    im = ax.imshow(
-        img,
-        extent=(bbox.x0, bbox.x1, bbox.y0, bbox.y1),
-        origin="lower",
-        interpolation="bilinear",
-        zorder=zorder if zorder is not None else 1,
-    )
-    im.set_transform(transform)
-    clip = PathPatch(path, transform=transform, facecolor="none", edgecolor="none")
-    im.set_clip_path(clip)
-    return im

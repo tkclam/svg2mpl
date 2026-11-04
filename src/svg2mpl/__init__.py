@@ -31,17 +31,17 @@ except PackageNotFoundError:  # not installed (e.g. running from a source tree)
     __version__ = "0.0.0+unknown"
 
 __all__ = [
-    "add_svg",
-    "load",
-    "load_string",
+    "Group",
+    "Image",
     "Scene",
     "Shape",
-    "Image",
-    "Group",
     "Text",
-    "get_bbox",
-    "get_affine_matrix",
-    "get_is_included",
-    "vectorize_dicts",
     "__version__",
+    "add_svg",
+    "get_affine_matrix",
+    "get_bbox",
+    "get_is_included",
+    "load",
+    "load_string",
+    "vectorize_dicts",
 ]

@@ -13,6 +13,7 @@ from colorsys import hls_to_rgb
 
 import numpy as np
 from matplotlib.colors import is_color_like, to_rgb, to_rgba
+from matplotlib.typing import ColorType
 
 __all__ = [
     "NONE",
@@ -75,9 +76,9 @@ def _channel(token: str) -> float:
 def parse_paint(
     value: str | None,
     *,
-    current_color: str | tuple = "black",
-    default: str = NONE,
-):
+    current_color: ColorType = "black",
+    default: ColorType = NONE,
+) -> ColorType:
     """Normalise an SVG paint value to something matplotlib can consume.
 
     Parameters
@@ -122,9 +123,9 @@ def _alpha_token(a: str) -> float:
 def parse_color(
     value: str | None,
     *,
-    current_color: str | tuple = "black",
-    default=NONE,
-):
+    current_color: ColorType = "black",
+    default: ColorType = NONE,
+) -> ColorType:
     """Parse a CSS/SVG ``<color>`` (no ``url()``) into a matplotlib color.
 
     Invalid colors yield ``default`` rather than raising, mirroring how a
@@ -151,7 +152,7 @@ def parse_color(
         return default
 
 
-def _parse_color(value: str, low: str):
+def _parse_color(value: str, low: str) -> ColorType:
 
     m = _RGB_RE.match(value)
     if m:
@@ -179,8 +180,8 @@ def _parse_color(value: str, low: str):
     if low.startswith("#"):
         digits = low[1:]
         if len(digits) in (3, 4) and all(c in "0123456789abcdef" for c in digits):
-            vals = [int(c * 2, 16) / 255.0 for c in digits]
-            return tuple(vals)
+            r, g, b, *a = (int(c * 2, 16) / 255.0 for c in digits)
+            return (r, g, b, a[0]) if a else (r, g, b)
         if len(digits) in (6, 8) and is_color_like(low):
             return low
         raise ValueError(value)
@@ -204,7 +205,7 @@ def _hue(token: str) -> float:
     return float(t) / 360.0
 
 
-def with_alpha(color, alpha: float):
+def with_alpha(color: ColorType, alpha: float) -> ColorType:
     """Multiply ``alpha`` into a color (``"none"`` and ``url()`` pass through)."""
     if color == NONE or (isinstance(color, str) and color.lower().startswith("url(")):
         return color
@@ -214,7 +215,7 @@ def with_alpha(color, alpha: float):
     return (r, g, b, a * alpha)
 
 
-def to_grayscale(color) -> tuple[float, float, float]:
+def to_grayscale(color: ColorType) -> tuple[float, float, float]:
     """Convert a matplotlib color to its luminance-preserving gray equivalent."""
     r, g, b = to_rgb(color)
     v = _LUMA[0] * r + _LUMA[1] * g + _LUMA[2] * b

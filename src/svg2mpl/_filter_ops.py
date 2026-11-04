@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 from PIL import Image as PILImage
@@ -69,7 +70,7 @@ def _gauss_axis(img, sigma, axis):
     if sigma <= 0:
         return img
     if sigma < 2.0:
-        r = max(1, int(math.ceil(sigma * 3)))
+        r = max(1, math.ceil(sigma * 3))
         x = np.arange(-r, r + 1)
         k = np.exp(-0.5 * (x / sigma) ** 2)
         k /= k.sum()
@@ -81,7 +82,7 @@ def _gauss_axis(img, sigma, axis):
         for i, w in enumerate(k):
             out += w * np.take(p, np.arange(i, i + n), axis=axis)
         return out
-    d = int(math.floor(sigma * 3 * math.sqrt(2 * math.pi) / 4 + 0.5))
+    d = math.floor(sigma * 3 * math.sqrt(2 * math.pi) / 4 + 0.5)
     for _ in range(3):
         img = _box_blur_axis(img, d, axis)
     return img
@@ -96,7 +97,7 @@ def gaussian_blur(img, sx_px, sy_px):
 def _shift(img, dx_px, dy_px):
     """Shift by (possibly fractional) pixels, filling with transparency."""
     out = img
-    ix, iy = int(math.floor(dx_px)), int(math.floor(dy_px))
+    ix, iy = math.floor(dx_px), math.floor(dy_px)
     fx, fy = dx_px - ix, dy_px - iy
 
     def int_shift(a, sx, sy):
@@ -266,7 +267,7 @@ def _blend(a, b, mode):
 def _morphology(img, op, rx, ry):
     fn = np.minimum if op == "erode" else np.maximum
     out = img
-    for axis, r in ((1, int(round(rx))), (0, int(round(ry)))):
+    for axis, r in ((1, round(rx)), (0, round(ry))):
         if r <= 0:
             continue
         pad = [(0, 0)] * img.ndim
@@ -280,6 +281,13 @@ def _morphology(img, op, rx, ry):
     return out
 
 
+_EDGE_MODES: dict[str, Literal["edge", "wrap", "constant"]] = {
+    "duplicate": "edge",
+    "wrap": "wrap",
+    "none": "constant",
+}
+
+
 def _convolve(img, prim):
     ox, oy = prim["order"]
     k = prim["kernel"]
@@ -288,9 +296,7 @@ def _convolve(img, prim):
     kern = np.array(k).reshape(oy, ox)
     div = prim["divisor"] or kern.sum() or 1.0
     tx, ty = prim["target"]
-    mode = {"duplicate": "edge", "wrap": "wrap", "none": "constant"}.get(
-        prim["edge"], "edge"
-    )
+    mode = _EDGE_MODES.get(prim["edge"], "edge")
     src = img if not prim["preserve_alpha"] else _unpremul(img)
     p = np.pad(src, ((oy, oy), (ox, ox), (0, 0)), mode=mode)
     h, w = img.shape[:2]
@@ -467,7 +473,7 @@ def _lighting(img, prim, ppx, ppy, region, specular):
         lv = np.array(
             [math.cos(az) * math.cos(el), math.sin(az) * math.cos(el), math.sin(el)]
         )
-        L = np.broadcast_to(lv, (h, w, 3))
+        to_light = np.broadcast_to(lv, (h, w, 3))
         lc = np.broadcast_to(color, (h, w, 3))
     else:
         ys, xs = np.mgrid[0:h, 0:w].astype(float)
@@ -475,14 +481,14 @@ def _lighting(img, prim, ppx, ppy, region, specular):
         py = (region[1] + (ys + 0.5) / ppy) * ppy
         lx, ly, lz = light["pos"]
         lx, ly, lz = lx * ppx, ly * ppy, lz * ppx
-        L = np.stack([lx - px, ly - py, lz - ss * alpha], axis=-1)
-        L /= np.linalg.norm(L, axis=-1, keepdims=True) + 1e-12
+        to_light = np.stack([lx - px, ly - py, lz - ss * alpha], axis=-1)
+        to_light /= np.linalg.norm(to_light, axis=-1, keepdims=True) + 1e-12
         lc = np.broadcast_to(color, (h, w, 3)).copy()
         if light["type"] == "spot":
             ax_, ay_, az_ = light["at"]
-            S = np.array([ax_ * ppx - lx, ay_ * ppy - ly, az_ * ppx - lz])
-            S /= np.linalg.norm(S) + 1e-12
-            minus_l_dot_s = -(L @ S)
+            spot_dir = np.array([ax_ * ppx - lx, ay_ * ppy - ly, az_ * ppx - lz])
+            spot_dir /= np.linalg.norm(spot_dir) + 1e-12
+            minus_l_dot_s = -(to_light @ spot_dir)
             fac = np.power(np.clip(minus_l_dot_s, 0, None), light["exp"])
             if light["cone"] is not None:
                 fac = np.where(
@@ -490,13 +496,13 @@ def _lighting(img, prim, ppx, ppy, region, specular):
                 )
             lc = lc * fac[..., None]
     if specular:
-        H = L + np.array([0, 0, 1.0])
-        H /= np.linalg.norm(H, axis=-1, keepdims=True) + 1e-12
-        f = prim["ks"] * np.power(np.clip((n * H).sum(-1), 0, None), prim["exp"])
+        halfway = to_light + np.array([0, 0, 1.0])
+        halfway /= np.linalg.norm(halfway, axis=-1, keepdims=True) + 1e-12
+        f = prim["ks"] * np.power(np.clip((n * halfway).sum(-1), 0, None), prim["exp"])
         rgb = np.clip(f[..., None] * lc, 0, 1)
         a = rgb.max(axis=-1, keepdims=True)
         return np.concatenate([rgb, a], axis=-1)
-    f = prim["kd"] * np.clip((n * L).sum(-1), 0, None)
+    f = prim["kd"] * np.clip((n * to_light).sum(-1), 0, None)
     rgb = np.clip(f[..., None] * lc, 0, 1)
     return np.concatenate([rgb, np.ones((h, w, 1))], axis=-1)
 
@@ -506,10 +512,10 @@ def _subregion_mask(prim, region, shape, ppx, ppy):
     if sub is None:
         return None
     h, w = shape
-    x0 = int(round((sub[0] - region[0]) * ppx))
-    x1 = int(round((sub[2] - region[0]) * ppx))
-    y0 = int(round((sub[1] - region[1]) * ppy))
-    y1 = int(round((sub[3] - region[1]) * ppy))
+    x0 = round((sub[0] - region[0]) * ppx)
+    x1 = round((sub[2] - region[0]) * ppx)
+    y0 = round((sub[1] - region[1]) * ppy)
+    y1 = round((sub[3] - region[1]) * ppy)
     m = np.zeros((h, w, 1))
     m[max(y0, 0) : max(min(y1, h), 0), max(x0, 0) : max(min(x1, w), 0)] = 1.0
     return m, (max(x0, 0), max(y0, 0), min(x1, w), min(y1, h))
@@ -540,10 +546,10 @@ def _fe_image(images, prim, region, shape, ppx, ppy, rasterize, linear):
     else:
         data, sub = entry[1], entry[2]
         img = np.zeros((h, w, 4))
-        x0 = int(round((sub[0] - region[0]) * ppx))
-        y0 = int(round((sub[1] - region[1]) * ppy))
-        x1 = int(round((sub[2] - region[0]) * ppx))
-        y1 = int(round((sub[3] - region[1]) * ppy))
+        x0 = round((sub[0] - region[0]) * ppx)
+        y0 = round((sub[1] - region[1]) * ppy)
+        x1 = round((sub[2] - region[0]) * ppx)
+        y1 = round((sub[3] - region[1]) * ppy)
         if x1 > x0 and y1 > y0:
             pil = PILImage.fromarray(np.asarray(data, dtype=np.uint8))
             pil = pil.resize((x1 - x0, y1 - y0))

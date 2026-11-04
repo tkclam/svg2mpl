@@ -24,6 +24,7 @@ from .geometry import (
     empty_path,
     evenodd_to_nonzero,
     intersect_clip,
+    is_empty,
     join_paths,
     normalize_orientation,
     path_extents,
@@ -35,6 +36,7 @@ from .geometry import (
 from .scene import Mask, Shape
 from .shapes import SHAPE_TAGS, shape_to_parsed
 from .style import is_hidden, is_invisible
+from .transform import compose
 from .units import parse_length, resolve_region
 
 if TYPE_CHECKING:
@@ -70,12 +72,12 @@ def clip_region(
         unit_box = (
             Affine2D().scale(bb[2] - bb[0], bb[3] - bb[1]).translate(bb[0], bb[1])
         )
-        base = base + unit_box
-    total = base + ctm
+        base = compose(base, unit_box)
+    total = compose(base, ctm)
     pieces = []
     for child in cp_el:
         geom = _clip_child_geometry(parser, child, cp_style, total, st)
-        if geom is not None and len(geom.vertices):
+        if geom is not None and not is_empty(geom):
             # Orient every piece the same way so the nonzero union is a union.
             pieces.append(normalize_orientation(geom))
     region = join_paths(pieces)
@@ -96,7 +98,7 @@ def _clip_child_geometry(
     tag = strip_ns(child.tag)
     target = child
     style = parser.child_style(child, cp_style)
-    to_doc = parser.transform_of(child) + total
+    to_doc = compose(parser.transform_of(child), total)
     if tag == "use":
         # A clipPath may only <use> shapes and text directly.
         ref = parser.ref(href(child))
@@ -109,7 +111,7 @@ def _clip_child_geometry(
         )
         target, style = ref, parser.child_style(ref, style)
         tag = strip_ns(target.tag)
-        to_doc = parser.transform_of(target) + offset + to_doc
+        to_doc = compose(parser.transform_of(target), offset, to_doc)
     if (tag not in SHAPE_TAGS and tag != "text") or is_hidden(style):
         return None
     if is_invisible(style):
@@ -121,7 +123,7 @@ def _clip_child_geometry(
         parser.text(target, style, to_doc, measured)
         return join_paths(item.path for item in measured.out)
     parsed = shape_to_parsed(tag, target.attrib, parser.ctx(style, st))
-    if parsed is None or len(parsed.path.vertices) == 0:
+    if parsed is None or is_empty(parsed.path):
         return None
     geom = parsed.path
     if (style.get("clip-rule") or "nonzero").strip() == "evenodd":
@@ -145,7 +147,9 @@ def build_mask(
         if bbox_user is None:
             return None
         bx0, by0, bx1, by1 = bbox_user
-        content_ctm = Affine2D().scale(bx1 - bx0, by1 - by0).translate(bx0, by0) + ctm
+        content_ctm = compose(
+            Affine2D().scale(bx1 - bx0, by1 - by0).translate(bx0, by0), ctm
+        )
     items: list = []
     mask_state = replace(
         st,

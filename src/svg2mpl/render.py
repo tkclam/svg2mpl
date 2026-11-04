@@ -25,7 +25,7 @@ from ._draw import DrawOptions, Renderer, emit_collection, get_is_included, is_b
 from .geometry import Rect, path_extents, rect_intersection, rect_is_empty, rect_union
 from .parser import parse, parse_string
 from .scene import Group, Scene, Shape
-from .transform import flip_y_transform
+from .transform import compose, flip_y_transform
 
 __all__ = [
     "DEFAULT_RASTER_RESOLUTION",
@@ -109,8 +109,8 @@ def get_affine_matrix(
     elif height is not None:
         affine2d.scale(height / h)
 
-    sx, sy = (scale, scale) if np.ndim(scale) == 0 else scale  # type: ignore[misc]
-    affine2d.scale(sx, sy)
+    sx, sy = np.broadcast_to(np.asarray(scale, dtype=float), (2,))
+    affine2d.scale(float(sx), float(sy))
 
     affine2d.rotate_deg(rotation)
     affine2d.translate(*target_xy)
@@ -343,7 +343,7 @@ def add_svg(
         per_path_kwargs=per_path_kwargs or {},
         global_kwargs=global_kwargs,
     )
-    renderer = Renderer(ax, flip + affine2d, base_transform, options, flip=flip)
+    renderer = Renderer(ax, compose(flip, affine2d), base_transform, options, flip=flip)
 
     result = None
     has_text = any(isinstance(s, Shape) and s.text is not None for s in items)

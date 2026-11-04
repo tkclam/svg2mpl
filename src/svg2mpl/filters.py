@@ -359,9 +359,9 @@ def _p_image(el, prim, pctx, index):
             pctx.filter.images[index] = ("items", items)
         return
     loaded = pctx.parser.load_image(ref)
-    if loaded is not None and loaded[0] == "raster":
+    if isinstance(loaded, np.ndarray):
         sub = prim.get("subregion") or pctx.filter.region
-        pctx.filter.images[index] = ("raster", loaded[1], sub)
+        pctx.filter.images[index] = ("raster", loaded, sub)
 
 
 _PRIMITIVE_PARSERS: dict[str, Callable] = {
@@ -397,7 +397,7 @@ _SEPIA = np.array([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 
 def _amount(args: str, default: float = 1.0) -> float:
     if not args:
         return default
-    return parse_fraction(args.split()[0], default)
+    return parse_fraction(args.split(maxsplit=1)[0], default)
 
 
 def _css_color_primitive(name: str, a: float) -> dict:

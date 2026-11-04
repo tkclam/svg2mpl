@@ -14,7 +14,8 @@ The CSS-wide keywords ``inherit``, ``initial`` and ``unset`` are honored, the
 an absolute size so ``em``/``%`` work for descendants.
 
 :func:`style_to_kwargs` then turns a computed style into kwargs accepted by
-:class:`~matplotlib.patches.PathPatch` / :class:`~matplotlib.collections.PathCollection`.
+:class:`~matplotlib.patches.PathPatch` and
+:class:`~matplotlib.collections.PathCollection`.
 Stroke widths and dash lengths are expressed in the element's *user units*; the
 parser scales them into document units and the renderer into points.
 """
@@ -25,20 +26,28 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from matplotlib.colors import to_rgba
+
 from .color import NONE, parse_color, parse_paint, with_alpha
-from .units import DEFAULT_FONT_SIZE, LengthContext, parse_length, split_length
+from .units import (
+    DEFAULT_FONT_SIZE,
+    LengthContext,
+    parse_length,
+    parse_number,
+    split_length,
+)
 
 __all__ = [
     "INHERITED",
     "PRESENTATION_PROPERTIES",
-    "parse_style_attr",
-    "declarations",
     "compute_style",
-    "style_to_kwargs",
+    "declarations",
+    "font_size",
     "is_hidden",
     "is_invisible",
-    "font_size",
     "opacity",
+    "parse_style_attr",
+    "style_to_kwargs",
 ]
 
 # Properties that inherit from parent to child per the SVG/CSS specs.
@@ -123,7 +132,6 @@ _LINEJOIN = {
     "round": "round",
     "bevel": "bevel",
 }
-_NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 _IMPORTANT_RE = re.compile(r"\s*!\s*important\s*$", re.IGNORECASE)
 
 _FONT_SIZE_KEYWORDS = {
@@ -156,7 +164,7 @@ def parse_style_attr(text: str | None) -> dict[str, str]:
     if not text:
         return out
     # Strip CSS comments first.
-    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     for decl in _split_decls(text):
         if ":" not in decl:
             continue
@@ -219,9 +227,8 @@ def _expand_shorthands(decls: dict[str, str]) -> dict[str, str]:
 def _parse_font_shorthand(value: str) -> dict[str, str]:
     value = value.strip()
     if value.lower() in ("inherit", "initial", "unset"):
-        return {
-            p: value for p in ("font-style", "font-weight", "font-size", "font-family")
-        }
+        names = ("font-style", "font-weight", "font-size", "font-family")
+        return dict.fromkeys(names, value)
     out = {
         "font-style": "normal",
         "font-variant": "normal",
@@ -315,9 +322,10 @@ def _resolve_font_weight(value: str, parent: str | None) -> str:
     v = value.strip().lower()
     if v not in ("bolder", "lighter"):
         return v
+    named = {"normal": "400", "bold": "700"}
     try:
-        base = int({"normal": "400", "bold": "700"}.get(parent or "400", parent))
-    except (TypeError, ValueError):
+        base = int(named.get(parent or "400", parent or "400"))
+    except ValueError:
         base = 400
     if v == "bolder":
         return str(400 if base < 400 else 700 if base < 600 else 900)
@@ -346,10 +354,10 @@ def compute_style(
         if keyword == "unset":
             continue  # inherited value (already copied) stays
         computed[k] = v
-    if "font-size" in own and own["font-size"].strip().lower() != "inherit":
-        if "font-size" in computed:
-            size = _resolve_font_size(computed["font-size"], parent_size)
-            computed["font-size"] = repr(float(size))
+    own_size = own.get("font-size", "inherit").strip().lower()
+    if own_size != "inherit" and "font-size" in computed:
+        size = _resolve_font_size(computed["font-size"], parent_size)
+        computed["font-size"] = repr(float(size))
     if "font-weight" in computed and "font-weight" in own:
         computed["font-weight"] = _resolve_font_weight(
             computed["font-weight"], (parent or {}).get("font-weight")
@@ -371,21 +379,14 @@ def _clamp01(x: float) -> float:
     return min(max(x, 0.0), 1.0)
 
 
-def _float(value: str | None, default: float) -> float:
-    if value is None:
-        return default
-    m = _NUM_RE.match(value.strip())
-    return float(m.group()) if m else default
-
-
 def opacity(value: str | None, default: float = 1.0) -> float:
     """Parse an opacity (number or percentage), clamped to ``[0, 1]``."""
     if value is None:
         return default
     v = value.strip()
     if v.endswith("%"):
-        return _clamp01(_float(v[:-1], default * 100.0) / 100.0)
-    return _clamp01(_float(v, default))
+        return _clamp01(parse_number(v[:-1], default * 100.0) / 100.0)
+    return _clamp01(parse_number(v, default))
 
 
 def _is_url(color) -> bool:
@@ -395,8 +396,6 @@ def _is_url(color) -> bool:
 def _own_alpha(color) -> float:
     if color == NONE or _is_url(color):
         return 1.0
-    from matplotlib.colors import to_rgba
-
     return to_rgba(color)[3]
 
 

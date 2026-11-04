@@ -66,4 +66,48 @@ line-length = 88
 src = ["src", "tests"]
 
 [tool.ruff.lint]
-extend-select = ["I", "UP", "B"]
+extend-select = [
+    "E",     # pycodestyle errors (incl. line length)
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # bugbear
+    "SIM",   # simplify
+    "C4",    # comprehensions
+    "PIE",   # misc lints
+    "RET",   # return statements
+    "RUF",   # ruff-specific
+    "PERF",  # performance
+    "PT",    # pytest style
+    "ARG",   # unused arguments
+    "BLE",   # blind except
+    "PLC",   # pylint conventions
+    "PLE",   # pylint errors
+    "PLW",   # pylint warnings
+    "N",     # naming
+    "PTH",   # pathlib
+    "FURB",  # refurb
+    "ICN",   # import conventions
+    "S",     # bandit security checks
+    "ISC",   # implicit string concatenation
+    "T10",   # debugger statements
+    "LOG",   # logging
+    "G",     # logging format
+]
+ignore = [
+    # svg2mpl renders files the caller chose to load; it does not protect
+    # against XML entity attacks (use defusedxml upstream for untrusted input).
+    "S314",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]  # pytest uses bare asserts
+"docs/**" = ["S101", "E501"]
+
+[tool.pyright]
+include = ["src"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"
+# numpy/matplotlib stubs model many valid array/transform operations loosely.
+reportIndexIssue = false
+reportAttributeAccessIssue = "warning"

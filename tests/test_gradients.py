@@ -1,14 +1,14 @@
 import matplotlib
 
 matplotlib.use("Agg")
-from xml.etree import ElementTree as ET  # noqa: E402
+from xml.etree import ElementTree as ET
 
-import matplotlib.pyplot as plt  # noqa: E402
-import numpy as np  # noqa: E402
-import pytest  # noqa: E402
+import matplotlib.pyplot as plt
+import numpy as np
+import pytest
 
-import svg2mpl  # noqa: E402
-from svg2mpl.gradients import parse_gradients  # noqa: E402
+import svg2mpl
+from svg2mpl.gradients import parse_gradients
 
 LINEAR = """<svg xmlns="http://www.w3.org/2000/svg"
                  xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 10 10">

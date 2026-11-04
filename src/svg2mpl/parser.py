@@ -18,12 +18,12 @@ from __future__ import annotations
 
 import contextlib
 import warnings
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path as FilePath
-from xml.etree import ElementTree
-from xml.etree.ElementTree import Element
 
+import numpy as np
 from matplotlib.path import Path
 from matplotlib.transforms import Affine2D
 
@@ -36,6 +36,7 @@ from .filters import Filter, css_filter, parse_filter
 from .geometry import (
     Rect,
     intersect_clip,
+    is_empty,
     path_extents,
     rect_intersection,
     rect_is_empty,
@@ -62,6 +63,7 @@ from .style import (
 )
 from .text import layout_text
 from .transform import (
+    compose,
     parse_preserve_aspect_ratio,
     parse_transform,
     parse_viewbox,
@@ -117,7 +119,7 @@ Body = Callable[[State], None]
 def parse(source: str | FilePath) -> Scene:
     """Parse an SVG file path into a :class:`Scene`."""
     path = FilePath(source)
-    root = ElementTree.parse(path).getroot()  # noqa: S314 - local input
+    root = ET.parse(path).getroot()
     return Parser(root, base_dir=str(path.resolve().parent)).build()
 
 
@@ -126,7 +128,7 @@ def parse_string(text: str, base_dir: str | None = None) -> Scene:
 
     ``base_dir`` resolves relative ``<image>`` references.
     """
-    root = ElementTree.fromstring(text)  # noqa: S314 - local input
+    root = ET.fromstring(text)
     return Parser(root, base_dir=base_dir).build()
 
 
@@ -137,12 +139,12 @@ def _length(value: str | None, axis: str, ctx: LengthContext, default=0.0) -> fl
 class Parser:
     """Walks one SVG document; see the module docstring."""
 
-    def __init__(self, root: Element, base_dir: str | None = None, depth: int = 0):
+    def __init__(self, root: ET.Element, base_dir: str | None = None, depth: int = 0):
         self.root = root
         self.base_dir = base_dir
         self.nest_depth = depth
         self.css = compute_css_declarations(root)
-        self.id_index: dict[str, Element] = {}
+        self.id_index: dict[str, ET.Element] = {}
         for e in root.iter():
             el_id = e.get("id") if isinstance(e.tag, str) else None
             if el_id and el_id not in self.id_index:
@@ -162,13 +164,13 @@ class Parser:
             self._warned.add(key)
             warnings.warn(msg, stacklevel=4)
 
-    def own_decls(self, el: Element) -> dict:
+    def own_decls(self, el: ET.Element) -> dict:
         return declarations(el.attrib, self.css.get(id(el)))
 
-    def child_style(self, el: Element, parent_style: dict | None) -> dict:
+    def child_style(self, el: ET.Element, parent_style: dict | None) -> dict:
         return compute_style(self.own_decls(el), parent_style)
 
-    def style_of(self, el: Element) -> dict:
+    def style_of(self, el: ET.Element) -> dict:
         """The computed style of ``el`` in its document context."""
         key = id(el)
         if key not in self._style_cache:
@@ -177,7 +179,7 @@ class Parser:
             self._style_cache[key] = compute_style(self.own_decls(el), parent_style)
         return self._style_cache[key]
 
-    def transform_of(self, el: Element) -> Affine2D:
+    def transform_of(self, el: ET.Element) -> Affine2D:
         """The element's own transform (CSS ``transform`` beats the attribute)."""
         inline = parse_style_attr(el.get("style")).get("transform")
         css = (self.css.get(id(el)) or {}).get("transform")
@@ -202,7 +204,7 @@ class Parser:
         return el
 
     @staticmethod
-    def conditions_pass(el: Element) -> bool:
+    def conditions_pass(el: ET.Element) -> bool:
         """Evaluate the conditional processing attributes."""
         ext = el.get("requiredExtensions")
         if ext is not None and ext.strip():
@@ -252,7 +254,7 @@ class Parser:
         vb, w, h = self.document_viewport()
         root_ctm = viewbox_transform(vb, w, h, self.root.get("preserveAspectRatio"))
         if outer_ctm is not None:
-            root_ctm = root_ctm + outer_ctm
+            root_ctm = compose(root_ctm, outer_ctm)
         vp = (vb[2], vb[3]) if vb else (w or 100.0, h or 100.0)
         self.servers = parse_gradients(
             self.root, style_of=self.style_of, ctx=LengthContext(*vp)
@@ -271,25 +273,25 @@ class Parser:
         root = self.root
         style = compute_style(self.own_decls(root), None)
         if not is_hidden(style):
-            ctm = self.transform_of(root) + st.ctm
+            ctm = compose(self.transform_of(root), st.ctm)
             self.with_effects(root, style, ctm, st, self._children_body(root, style))
         return self.scene
 
     # ------------------------------------------------------------------ #
     # Traversal
     # ------------------------------------------------------------------ #
-    def _children_body(self, el: Element, style: dict) -> Body:
+    def _children_body(self, el: ET.Element, style: dict) -> Body:
         def body(st: State) -> None:
             self.children(el, st, style)
 
         return body
 
-    def children(self, el: Element, st: State, style: dict) -> None:
+    def children(self, el: ET.Element, st: State, style: dict) -> None:
         inner = replace(st, style=style)
         for child in el:
             self.walk(child, inner)
 
-    def walk(self, el: Element, st: State) -> None:
+    def walk(self, el: ET.Element, st: State) -> None:
         """Render ``el`` (and its subtree) into ``st.out``."""
         if not is_svg_element(el) or st.depth > _MAX_DEPTH:
             return
@@ -299,10 +301,10 @@ class Parser:
         style = compute_style(self.own_decls(el), st.style)
         if is_hidden(style):
             return
-        ctm = self.transform_of(el) + st.ctm
+        ctm = compose(self.transform_of(el), st.ctm)
         self.render(el, tag, style, ctm, replace(st, depth=st.depth + 1))
 
-    def render(self, el: Element, tag: str, style: dict, ctm: Affine2D, st: State):
+    def render(self, el: ET.Element, tag: str, style: dict, ctm: Affine2D, st: State):
         """Dispatch on the element type (after style and transform)."""
         if tag in _CONTAINER_TAGS:
             self.with_effects(el, style, ctm, st, self._children_body(el, style))
@@ -322,7 +324,7 @@ class Parser:
             leaf = lambda s: self.image(el, style, ctm, s)  # noqa: E731
             self.with_effects(el, style, ctm, st, leaf, leaf=True)
 
-    def switch(self, el: Element, st: State, style: dict) -> None:
+    def switch(self, el: ET.Element, st: State, style: dict) -> None:
         """Render the first direct child whose conditions pass."""
         inner = replace(st, style=style)
         for child in el:
@@ -338,7 +340,7 @@ class Parser:
     # ------------------------------------------------------------------ #
     def with_effects(
         self,
-        el: Element,
+        el: ET.Element,
         style: dict,
         ctm: Affine2D,
         st: State,
@@ -366,7 +368,7 @@ class Parser:
                     # Two non-convex clips: composite off-screen, clip twice.
                     self._double_clip(el, style, st, body, leaf, region)
                     return
-            if clip is not None and len(clip.vertices) == 0:
+            if clip is not None and is_empty(clip):
                 return  # clipped away entirely
         st = replace(st, clip=clip)
         mask_el = self.ref(style.get("mask"), ("mask",))
@@ -381,7 +383,7 @@ class Parser:
         else:
             body(st)
 
-    def _group_opacity(self, el: Element, st: State, body: Body, op: float) -> None:
+    def _group_opacity(self, el: ET.Element, st: State, body: Body, op: float) -> None:
         """Apply a container's ``opacity``.
 
         Multiplying the opacity into each child is exact when the children do
@@ -415,7 +417,13 @@ class Parser:
         body(replace(st, opacity=1.0, out=group.items, clip=None))
 
     def _double_clip(
-        self, el: Element, style: dict, st: State, body: Body, leaf: bool, inner: Path
+        self,
+        el: ET.Element,
+        style: dict,
+        st: State,
+        body: Body,
+        leaf: bool,
+        inner: Path,
     ) -> None:
         """Clip by two non-convex regions: the inner one inside an off-screen
         group, the outer one on the group's image."""
@@ -444,12 +452,12 @@ class Parser:
 
     def _effect_group(
         self,
-        el: Element,
+        el: ET.Element,
         style: dict,
         st: State,
         body: Body,
         leaf: bool,
-        mask_el: Element | None,
+        mask_el: ET.Element | None,
         flt: str | None,
         op: float,
     ) -> None:
@@ -494,7 +502,7 @@ class Parser:
             inner = replace(inner, opacity=1.0 / op)
         body(inner)
 
-    def bbox(self, el: Element, style: dict, st: State) -> Rect | None:
+    def bbox(self, el: ET.Element, style: dict, st: State) -> Rect | None:
         """The element's geometry bounding box in its own user space."""
         measured = replace(
             st, out=[], measuring=True, clip=None, ctm=Affine2D(), opacity=1.0
@@ -521,7 +529,7 @@ class Parser:
 
     def nested_svg(
         self,
-        el: Element,
+        el: ET.Element,
         style: dict,
         ctm: Affine2D,
         st: State,
@@ -539,20 +547,20 @@ class Parser:
             return
         vb = parse_viewbox(el.get("viewBox"))
         par = el.get("preserveAspectRatio")
-        inner_ctm = viewbox_transform(vb, w, h, par, x, y) + ctm
+        inner_ctm = compose(viewbox_transform(vb, w, h, par, x, y), ctm)
         vp = (vb[2], vb[3]) if vb else (w, h)
 
         def body(s: State) -> None:
             clip = s.clip
             if not s.measuring:
                 clip = self._viewport_clip(style, (x, y, x + w, y + h), ctm, s)
-                if clip is not None and len(clip.vertices) == 0:
+                if clip is not None and is_empty(clip):
                     return
             self.children(el, replace(s, ctm=inner_ctm, vp=vp, clip=clip), style)
 
         self.with_effects(el, style, ctm, st, body)
 
-    def use(self, el: Element, style: dict, ctm: Affine2D, st: State) -> None:
+    def use(self, el: ET.Element, style: dict, ctm: Affine2D, st: State) -> None:
         """Instantiate a ``<use>`` reference."""
         target = self.ref(href(el))
         if target is None or id(target) in st.chain or el is target:
@@ -561,7 +569,7 @@ class Parser:
         offset = Affine2D().translate(
             _length(el.get("x"), "x", ctx), _length(el.get("y"), "y", ctx)
         )
-        use_ctm = offset + ctm
+        use_ctm = compose(offset, ctm)
         tag = strip_ns(target.tag)
 
         def body(s: State) -> None:
@@ -577,14 +585,14 @@ class Parser:
                     _length(w, "x", ctx) if w else None,
                     _length(h, "y", ctx) if h else None,
                 )
-                target_ctm = self.transform_of(target) + use_ctm
+                target_ctm = compose(self.transform_of(target), use_ctm)
                 self.nested_svg(target, target_style, target_ctm, s, size=size)
             else:
                 self.walk(target, replace(s, style=style))
 
         self.with_effects(el, style, ctm, st, body)
 
-    def _symbol(self, use_el: Element, sym: Element, use_style: dict, st: State):
+    def _symbol(self, use_el: ET.Element, sym: ET.Element, use_style: dict, st: State):
         """A ``<symbol>`` instantiated by ``use_el`` (``st.ctm`` is the use's)."""
         sym_style = self.child_style(sym, use_style)
         if is_hidden(sym_style):
@@ -597,11 +605,11 @@ class Parser:
         x, y = _length(sym.get("x"), "x", ctx), _length(sym.get("y"), "y", ctx)
         vb = parse_viewbox(sym.get("viewBox"))
         par = sym.get("preserveAspectRatio")
-        inner_ctm = viewbox_transform(vb, w, h, par, x, y) + st.ctm
+        inner_ctm = compose(viewbox_transform(vb, w, h, par, x, y), st.ctm)
         clip = st.clip
         if not st.measuring:
             clip = self._viewport_clip(sym_style, (x, y, x + w, y + h), st.ctm, st)
-            if clip is not None and len(clip.vertices) == 0:
+            if clip is not None and is_empty(clip):
                 return
         vp = (vb[2], vb[3]) if vb else (w, h)
         self.children(sym, replace(st, ctm=inner_ctm, vp=vp, clip=clip), sym_style)
@@ -610,10 +618,10 @@ class Parser:
     # Leaves: shapes, text, images
     # ------------------------------------------------------------------ #
     def shape(
-        self, el: Element, tag: str, style: dict, ctm: Affine2D, st: State
+        self, el: ET.Element, tag: str, style: dict, ctm: Affine2D, st: State
     ) -> None:
         parsed = shape_to_parsed(tag, el.attrib, self.ctx(style, st))
-        if parsed is None or len(parsed.path.vertices) == 0:
+        if parsed is None or is_empty(parsed.path):
             return
         if st.measuring:
             st.out.append(Shape(el.get("id", ""), parsed.path.transformed(ctm), {}, {}))
@@ -642,7 +650,7 @@ class Parser:
             else:
                 st.out.extend(s for s in shapes if not has_fill(s))
 
-    def textpath_geometry(self, tp: Element) -> Path | None:
+    def textpath_geometry(self, tp: ET.Element) -> Path | None:
         """The path a ``<textPath>`` follows, in the text's user space."""
         d = tp.get("path")
         if d:
@@ -659,7 +667,7 @@ class Parser:
             path = reverse_path(path)
         return path
 
-    def text(self, el: Element, style: dict, ctm: Affine2D, st: State) -> None:
+    def text(self, el: ET.Element, style: dict, ctm: Affine2D, st: State) -> None:
         runs, content, first = layout_text(
             el,
             style,
@@ -685,7 +693,7 @@ class Parser:
         for run in runs:
             bbox_user = rect_union(bbox_user, path_extents(run.path))
         for run in runs:
-            if is_invisible(run.style) or len(run.path.vertices) == 0:
+            if is_invisible(run.style) or is_empty(run.path):
                 continue
             shapes, _ = paint_shape(
                 self, run.id, run.path, run.style, ctm, st, bbox_user, text=record
@@ -705,7 +713,7 @@ class Parser:
             )
             return None
 
-    def image(self, el: Element, style: dict, ctm: Affine2D, st: State) -> None:
+    def image(self, el: ET.Element, style: dict, ctm: Affine2D, st: State) -> None:
         ctx = self.ctx(style, st)
         x, y = _length(el.get("x"), "x", ctx), _length(el.get("y"), "y", ctx)
         w_attr, h_attr = el.get("width"), el.get("height")
@@ -717,15 +725,16 @@ class Parser:
         loaded = self.load_image(ref) if ref else None
         if loaded is None:
             return
-        kind, payload = loaded
-        if kind == "svg":
-            sub = Parser(payload, base_dir=self.base_dir, depth=self.nest_depth + 1)
+        pixels: np.ndarray | None = None
+        sub: Parser | None = None
+        if isinstance(loaded, np.ndarray):
+            pixels = loaded
+            ih, iw = pixels.shape[:2]
+        else:
+            sub = Parser(loaded, base_dir=self.base_dir, depth=self.nest_depth + 1)
             vb, iw, ih = sub.document_viewport()
             iw = iw or (vb[2] if vb else 100.0)
             ih = ih or (vb[3] if vb else 100.0)
-        else:
-            sub = None
-            ih, iw = payload.shape[:2]
         w, h = auto_size(w, h, iw, ih)
         viewport = rect_path(x, y, x + w, y + h).transformed(ctm)
         if st.measuring:
@@ -740,16 +749,16 @@ class Parser:
                 clip = intersect_clip(clip, viewport)
         alpha = opacity(style.get("opacity")) * st.opacity
         # Map the image's own pixel (or document) space into its viewport.
-        mapping = viewbox_transform((0, 0, iw, ih), w, h, par, x, y) + ctm
-        if sub is not None:
-            if self.nest_depth < _MAX_NESTED_DOCUMENTS:
+        mapping = compose(viewbox_transform((0, 0, iw, ih), w, h, par, x, y), ctm)
+        if pixels is None:
+            if sub is not None and self.nest_depth < _MAX_NESTED_DOCUMENTS:
                 sub.build(outer_ctm=mapping, out=st.out, group_opacity=alpha, clip=clip)
             return
         rendering = (style.get("image-rendering") or "auto").strip().lower()
         st.out.append(
             Image(
                 id=el.get("id", ""),
-                data=payload,
+                data=pixels,
                 transform=mapping,
                 clip=clip,
                 alpha=alpha,

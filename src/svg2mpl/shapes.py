@@ -8,11 +8,11 @@ coordinate system; transforms are applied later by the scene traversal.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 
 import numpy as np
 from matplotlib.path import Path
+from matplotlib.transforms import Affine2D
 
 from ._xml import strip_ns
 from .geometry import empty_path
@@ -21,13 +21,13 @@ from .pathdata import (
     parse_path_data,
     polyline_path_data,
 )
-from .units import LengthContext, parse_length
+from .units import LengthContext, parse_length, parse_numbers
 
 __all__ = [
-    "SHAPE_TAGS",
     "MARKABLE_TAGS",
-    "shape_to_path",
+    "SHAPE_TAGS",
     "shape_to_parsed",
+    "shape_to_path",
     "strip_ns",
 ]
 
@@ -38,7 +38,6 @@ SHAPE_TAGS = frozenset(
 MARKABLE_TAGS = frozenset({"path", "line", "polyline", "polygon"})
 
 
-_LENGTH_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 # Cubic-Bezier circle approximation constant (4/3 * (sqrt(2) - 1)).
 _KAPPA = 0.5522847498307936
 
@@ -55,7 +54,7 @@ def _length(
 
 def _points(value: str | None) -> np.ndarray:
     """Parse a ``points`` list into an ``(n, 2)`` array."""
-    nums = [float(m) for m in _LENGTH_RE.findall(value or "")]
+    nums = parse_numbers(value)
     nums = nums[: len(nums) - (len(nums) % 2)]  # drop a dangling coordinate
     return np.array(nums, dtype=float).reshape(-1, 2)
 
@@ -125,16 +124,15 @@ def _rect(a: Mapping[str, str], ctx=None) -> Path:
     rx, ry = radius("rx", "x"), radius("ry", "y")
     if rx is None and ry is None:
         return Path.unit_rectangle().transformed(_box_transform(x, y, w, h))
+    # One radius given: the other copies it (rx/ry "auto").
     rx = ry if rx is None else rx
     ry = rx if ry is None else ry
-    if rx <= 0 or ry <= 0:
+    if rx is None or ry is None or rx <= 0 or ry <= 0:
         return Path.unit_rectangle().transformed(_box_transform(x, y, w, h))
     return _rounded_rect(x, y, w, h, rx, ry)
 
 
 def _box_transform(x, y, w, h):
-    from matplotlib.transforms import Affine2D
-
     return Affine2D().scale(w, h).translate(x, y)
 
 

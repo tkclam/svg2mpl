@@ -1,10 +1,10 @@
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import pytest  # noqa: E402
+import matplotlib.pyplot as plt
+import pytest
 
-import svg2mpl  # noqa: E402
+import svg2mpl
 
 TEXT = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <text id="t" x="10" y="20" font-size="12" fill="navy" text-anchor="middle">Hi</text>
