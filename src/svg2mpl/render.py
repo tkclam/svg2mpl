@@ -1,44 +1,50 @@
 """Public API: load an SVG and add its artists to a matplotlib axes.
 
-``add_svg`` is the high-level entry point. It mirrors the placement / exclude /
-recolor conveniences that were previously baked into flyplotlib (positioning a
-drawing by a normalized anchor, scaling to a target size, rotating, excluding
-paths by id, recoloring per id, grayscale) while rendering a *faithful* scene
-graph underneath.
+``add_svg`` is the high-level entry point. It positions a drawing by a
+normalized anchor, scales it to a target size, rotates it, excludes paths by id,
+recolors per id or converts to grayscale, while rendering a *faithful* scene
+underneath (see :mod:`svg2mpl._draw`): drawables are emitted in document
+(painter's) order, strokes scale with the drawing, clip paths are applied,
+gradients and patterns become clipped images, and masked or filtered groups
+are composited off-screen.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from functools import cache
 from pathlib import Path as FilePath
 from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.collections import PathCollection
-from matplotlib.patches import PathPatch
 from matplotlib.transforms import Affine2D, Bbox
 
-from .color import parse_url_ref, to_grayscale
+from ._draw import DrawOptions, Renderer, emit_collection, get_is_included, is_batchable
+from .clipping import clipped_extents
+from .geometry import Rect, rect_union
 from .parser import parse, parse_string
-from .scene import Scene
-from .transform import flip_y_transform
+from .scene import Group, Scene, Shape
+from .transform import compose, flip_y_transform
 
 __all__ = [
+    "DEFAULT_RASTER_RESOLUTION",
+    "add_svg",
+    "get_affine_matrix",
+    "get_bbox",
+    "get_is_included",
     "load",
     "load_string",
-    "add_svg",
-    "get_bbox",
-    "get_affine_matrix",
-    "get_is_included",
     "vectorize_dicts",
 ]
 
+# Pixels across the document's larger side for off-screen effects.
+DEFAULT_RASTER_RESOLUTION = 1024
+
 
 # --------------------------------------------------------------------------- #
-# Loading (cached on path + mtime, like flyplotlib's _parse_svg)
+# Loading (cached on path + mtime)
 # --------------------------------------------------------------------------- #
 @cache
 def _load_cached(path_str: str, _mtime: float) -> Scene:
@@ -63,7 +69,7 @@ def load_string(text: str) -> Scene:
 
 
 # --------------------------------------------------------------------------- #
-# Generic geometry helpers (ported verbatim from flyplotlib.core)
+# Generic geometry helpers
 # --------------------------------------------------------------------------- #
 def get_bbox(paths: Iterable[Any]) -> Bbox:
     """Return the bounding box enclosing a collection of paths."""
@@ -104,21 +110,12 @@ def get_affine_matrix(
     elif height is not None:
         affine2d.scale(height / h)
 
-    if np.ndim(scale) == 0:
-        affine2d.scale(scale, scale)
-    else:
-        affine2d.scale(*scale)
+    sx, sy = np.broadcast_to(np.asarray(scale, dtype=float), (2,))
+    affine2d.scale(float(sx), float(sy))
 
     affine2d.rotate_deg(rotation)
     affine2d.translate(*target_xy)
     return affine2d
-
-
-def get_is_included(id_: str, exclude: str | Iterable[str]) -> bool:
-    """Return whether ``id_`` survives the ``exclude`` regular expressions."""
-    if isinstance(exclude, str):
-        exclude = (exclude,)
-    return not any(re.match(r, id_) for r in exclude)
 
 
 def vectorize_dicts(dicts: Mapping[str, Mapping[str, Any]]) -> dict[str, list] | None:
@@ -137,86 +134,50 @@ def vectorize_dicts(dicts: Mapping[str, Mapping[str, Any]]) -> dict[str, list] |
 
 
 # --------------------------------------------------------------------------- #
-# Scene -> matplotlib
+# Scene helpers
 # --------------------------------------------------------------------------- #
 def _as_tuple(x: str | Iterable[str]) -> tuple[str, ...]:
     return (x,) if isinstance(x, str) else tuple(x)
+
+
+def _geometry_extents(items, exclude=(), bbox_exclude=()) -> Rect | None:
+    box = None
+    for item in items:
+        if get_is_included(item.id, exclude) and get_is_included(item.id, bbox_exclude):
+            box = rect_union(box, clipped_extents(item))
+    return box
 
 
 def _flip_height(scene: Scene) -> float:
     """Height to flip about: the document height, else the geometry extent."""
     if scene.height:
         return scene.height
-    if scene.shapes:
-        bb = get_bbox([s.path for s in scene.shapes])
-        return float(bb.y0 + bb.y1)
-    return 0.0
+    box = _geometry_extents(scene.items)
+    return float(box[1] + box[3]) if box is not None else 0.0
 
 
-def _is_url(value) -> bool:
-    return isinstance(value, str) and value.lower().startswith("url(")
-
-
-def _resolve_fill(value, scene: Scene):
-    """Replace an unresolved ``url(#id)`` paint with a usable color (edge paints)."""
-    if _is_url(value):
-        ref = parse_url_ref(value)
-        grad = scene.gradients.get(ref) if ref else None
-        if grad is not None:
-            return grad.average_color()
-        return "none"
-    return value
-
-
-def get_path_dicts(
-    scene: Scene,
-    *,
-    flip_y: bool = True,
-    exclude: str | Iterable[str] = (),
-    grayscale: bool = False,
-    per_path_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
-    **global_kwargs: Any,
-) -> dict[str, dict[str, Any]]:
-    """Build per-shape matplotlib property dicts from a scene.
-
-    The returned dicts are keyed by path id and carry the matplotlib kwargs plus
-    a ``path`` entry (geometry in display space, with the optional y-flip
-    applied).
-    """
-    per_path_kwargs = per_path_kwargs or {}
-    flip = flip_y_transform(_flip_height(scene)) if flip_y else None
-
-    dicts: dict[str, dict[str, Any]] = {}
-    for shape in scene.shapes:
-        if not get_is_included(shape.id, exclude):
+def _filter_items(items: list, exclude: tuple[str, ...]) -> list:
+    """Drop items (recursively inside groups) whose id matches ``exclude``."""
+    out = []
+    for item in items:
+        if not get_is_included(item.id, exclude):
             continue
-        entry = dict(shape.kwargs)
+        if isinstance(item, Group):
+            kids = _filter_items(item.items, exclude)
+            if not kids:
+                continue
+            if len(kids) != len(item.items):
+                item = replace(item, items=kids)  # noqa: PLW2901
+        out.append(item)
+    return out
 
-        # Gradient fills can't be a matplotlib color: blank the face and tag the
-        # entry so add_svg can overlay a clipped gradient image later.
-        grad_ref = None
-        if _is_url(entry.get("facecolor")):
-            ref = parse_url_ref(entry["facecolor"])
-            grad_ref = ref if ref and ref in scene.gradients else None
-            entry["facecolor"] = "none"
-        entry["edgecolor"] = _resolve_fill(entry.get("edgecolor"), scene)
-        if grayscale and entry.get("facecolor") not in (None, "none"):
-            entry["facecolor"] = to_grayscale(entry["facecolor"])
-        entry["path"] = shape.path.transformed(flip) if flip else shape.path
 
-        entry.update(global_kwargs)
-        for prop, mapping in per_path_kwargs.items():
-            if shape.id in mapping:
-                entry[prop] = mapping[shape.id]
-        # Only fall back to a gradient overlay if the user didn't set a fill.
-        if grad_ref is not None and entry.get("facecolor") == "none":
-            entry["_gradient"] = grad_ref
-        # Keep duplicate ids from clobbering each other in the collection.
-        key = shape.id or f"__shape_{len(dicts)}"
-        while key in dicts:
-            key += "_"
-        dicts[key] = entry
-    return dicts
+def _placement_bbox(items, flip: Affine2D, bbox_exclude) -> Bbox | None:
+    box = _geometry_extents(items, (), bbox_exclude)
+    if box is None:
+        return None
+    pts = flip.transform([(box[0], box[1]), (box[2], box[3])])
+    return Bbox([pts.min(axis=0), pts.max(axis=0)])
 
 
 @cache
@@ -226,18 +187,30 @@ def _cached_bbox(
     flip_y: bool,
     exclude: tuple[str, ...],
     bbox_exclude: tuple[str, ...],
-) -> Bbox:
-    """Cached display-space bbox of the drawn, non-excluded paths."""
+) -> Bbox | None:
+    """Cached placement bbox of the drawn, non-excluded items of a file."""
     scene = _load_cached(path_str, _mtime)
-    flip = flip_y_transform(_flip_height(scene)) if flip_y else None
-    paths = [
-        (s.path.transformed(flip) if flip else s.path)
-        for s in scene.shapes
-        if get_is_included(s.id, exclude) and get_is_included(s.id, bbox_exclude)
-    ]
-    return get_bbox(paths)
+    flip = flip_y_transform(_flip_height(scene)) if flip_y else Affine2D()
+    return _placement_bbox(_filter_items(scene.items, exclude), flip, bbox_exclude)
 
 
+def _resolve_source(source) -> tuple[Scene, tuple[str, float] | None]:
+    """Return ``(scene, cache_key)`` for a path or inline-markup source.
+
+    ``cache_key`` is ``(path_str, mtime)`` for files (enabling bbox caching) or
+    ``None`` for inline markup.
+    """
+    if isinstance(source, str) and source.lstrip().startswith("<"):
+        return load_string(source), None
+    p = FilePath(source)
+    if not p.exists():
+        raise FileNotFoundError(f"SVG file not found: {source}")
+    return _load_cached(str(p), p.stat().st_mtime), (str(p), p.stat().st_mtime)
+
+
+# --------------------------------------------------------------------------- #
+# add_svg
+# --------------------------------------------------------------------------- #
 def add_svg(
     source: str | FilePath,
     xy: tuple[float, float] = (0, 0),
@@ -255,6 +228,8 @@ def add_svg(
     force_patches: bool = False,
     ax=None,
     per_path_kwargs: Mapping[str, Mapping[str, Any]] | None = None,
+    text_as_paths: bool = True,
+    raster_resolution: int = DEFAULT_RASTER_RESOLUTION,
     **global_kwargs: Any,
 ):
     """Render an SVG into a matplotlib axes.
@@ -291,7 +266,7 @@ def add_svg(
         Regular expressions for paths to ignore when computing the placement
         bounding box.
     grayscale : bool, optional
-        Convert fill colors to grayscale.
+        Convert all colors (fills, strokes, gradients, images) to grayscale.
     force_patches : bool, optional
         Return individual :class:`~matplotlib.patches.PathPatch` objects instead
         of a single :class:`~matplotlib.collections.PathCollection`.
@@ -299,8 +274,16 @@ def add_svg(
         Axes to draw on (default current axes).
     per_path_kwargs : Mapping of Mapping, optional
         Per-path overrides: ``{property: {path_id: value}}``.
+    text_as_paths : bool, optional
+        Draw text as glyph outlines (default), which follow the drawing's scale,
+        clipping and paint exactly. ``False`` uses matplotlib ``Text`` artists
+        instead (selectable text in vector output, sizes in points).
+    raster_resolution : int, optional
+        Pixels across the document's larger side used for off-screen effects
+        (masks, filters, patterns). Default 1024.
     **global_kwargs
-        Keyword arguments applied to every path.
+        Keyword arguments applied to every path. ``linewidth`` given here (or in
+        ``per_path_kwargs``) is in points and does not scale with the drawing.
 
     Returns
     -------
@@ -309,110 +292,56 @@ def add_svg(
         path id to ``PathPatch``.
     """
     scene, cache_key = _resolve_source(source)
-
     exclude = _as_tuple(exclude)
     bbox_exclude = _as_tuple(bbox_exclude)
-
-    path_dicts = get_path_dicts(
-        scene,
-        flip_y=flip_y,
-        exclude=exclude,
-        grayscale=grayscale,
-        per_path_kwargs=per_path_kwargs,
-        **global_kwargs,
-    )
-    if not path_dicts and not scene.texts:
+    items = _filter_items(scene.items, exclude)
+    if not items:
         raise ValueError(f"No paths to draw from {source!r} (all were excluded?).")
 
     if ax is None:
         ax = plt.gca()
     base_transform = ax.transData if transform is None else transform
+    flip = flip_y_transform(_flip_height(scene)) if flip_y else Affine2D()
 
     affine2d = Affine2D()  # identity when not placing
-    if place and path_dicts:
+    if place:
         if cache_key is not None:
             bbox = _cached_bbox(*cache_key, flip_y, exclude, bbox_exclude)
         else:
-            bbox = get_bbox([d["path"] for d in path_dicts.values()])
-        affine2d = get_affine_matrix(
-            bbox=bbox,
-            source_xy=origin,
-            target_xy=xy,
-            rotation=rotation,
-            width=width,
-            height=height,
-            scale=scale,
-        )
-    full_transform = affine2d + base_transform
+            bbox = _placement_bbox(items, flip, bbox_exclude)
+        if bbox is not None and bbox.width > 0 and bbox.height > 0:
+            affine2d = get_affine_matrix(
+                bbox=bbox,
+                source_xy=origin,
+                target_xy=xy,
+                rotation=rotation,
+                width=width,
+                height=height,
+                scale=scale,
+            )
 
-    # Gradient-filled shapes can't be batched (they need a clipped image each).
-    has_gradients = any("_gradient" in d for d in path_dicts.values())
-
-    result = _emit(
-        ax,
-        path_dicts,
-        full_transform,
-        force_patches=force_patches or has_gradients,
+    size = max(scene.width, scene.height)
+    if not size:
+        box = _geometry_extents(items)
+        size = max(box[2] - box[0], box[3] - box[1]) if box else 1.0
+    options = DrawOptions(
+        zorder=global_kwargs.pop("zorder", 1),
+        density=raster_resolution / (size or 1.0),
+        grayscale=grayscale,
+        text_as_paths=text_as_paths,
+        per_path_kwargs=per_path_kwargs or {},
+        global_kwargs=global_kwargs,
     )
+    renderer = Renderer(ax, compose(flip, affine2d), base_transform, options, flip=flip)
 
-    if has_gradients:
-        _add_gradient_fills(ax, scene, path_dicts, affine2d, base_transform)
-    if scene.texts:
-        from .text import add_texts
-
-        flip = flip_y_transform(_flip_height(scene)) if flip_y else None
-        add_texts(
-            ax, scene, affine2d=affine2d, flip=flip, base_transform=base_transform
-        )
+    result = None
+    has_text = any(isinstance(s, Shape) and s.text is not None for s in items)
+    if not force_patches and is_batchable(items) and (text_as_paths or not has_text):
+        result = emit_collection(renderer, items)
+    if result is None:
+        renderer.draw(items)
+        renderer.finish()
+        result = renderer.patches
 
     ax.autoscale_view()
     return result
-
-
-def _emit(ax, path_dicts, transform, *, force_patches: bool):
-    """Draw the shapes as a single PathCollection or as individual patches."""
-    vectorized = None if force_patches else vectorize_dicts(path_dicts)
-    if vectorized is not None:
-        vectorized["paths"] = vectorized.pop("path")
-        collection = PathCollection(**vectorized)
-        collection.set_transform(transform)
-        ax.add_collection(collection)
-        return collection
-
-    patches = {}
-    for key, value in path_dicts.items():
-        value = {k: v for k, v in value.items() if k != "_gradient"}
-        patch = PathPatch(**value)
-        patch.set_transform(transform)
-        ax.add_patch(patch)
-        patches[key] = patch
-    return patches
-
-
-def _add_gradient_fills(ax, scene, path_dicts, affine2d, base_transform) -> None:
-    """Overlay a clipped gradient image for every gradient-filled shape."""
-    from .gradients import add_gradient_fill
-
-    for value in path_dicts.values():
-        ref = value.get("_gradient")
-        if ref is None:
-            continue
-        grad = scene.gradients.get(ref)
-        if grad is None:
-            continue
-        final_path = value["path"].transformed(affine2d)
-        add_gradient_fill(ax, final_path, grad, transform=base_transform)
-
-
-def _resolve_source(source):
-    """Return ``(scene, cache_key)`` for a path or inline-markup source.
-
-    ``cache_key`` is ``(path_str, mtime)`` for files (enabling bbox caching) or
-    ``None`` for inline markup.
-    """
-    if isinstance(source, str) and source.lstrip().startswith("<"):
-        return load_string(source), None
-    p = FilePath(source)
-    if not p.exists():
-        raise FileNotFoundError(f"SVG file not found: {source}")
-    return _load_cached(str(p), p.stat().st_mtime), (str(p), p.stat().st_mtime)

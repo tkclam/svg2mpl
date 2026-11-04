@@ -1,21 +1,10 @@
-import matplotlib
+import pytest
 
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-import pytest  # noqa: E402
-
-import svg2mpl  # noqa: E402
+import svg2mpl
 
 TEXT = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <text id="t" x="10" y="20" font-size="12" fill="navy" text-anchor="middle">Hi</text>
 </svg>"""
-
-
-@pytest.fixture
-def ax():
-    fig, ax = plt.subplots()
-    yield ax
-    plt.close(fig)
 
 
 def test_text_is_collected():
@@ -25,7 +14,7 @@ def test_text_is_collected():
 
 
 def test_text_rendered_with_style(ax):
-    svg2mpl.add_svg(TEXT, ax=ax, place=False)
+    svg2mpl.add_svg(TEXT, ax=ax, place=False, text_as_paths=False)
     assert len(ax.texts) == 1
     artist = ax.texts[0]
     assert artist.get_text() == "Hi"
@@ -35,7 +24,7 @@ def test_text_rendered_with_style(ax):
 
 def test_text_anchor_flipped(ax):
     # y=20 in a 100-tall doc flips to 80 with flip_y
-    svg2mpl.add_svg(TEXT, ax=ax, place=False, flip_y=True)
+    svg2mpl.add_svg(TEXT, ax=ax, place=False, flip_y=True, text_as_paths=False)
     assert ax.texts[0].get_position()[1] == pytest.approx(80.0)
 
 

@@ -73,6 +73,15 @@ the numbers match the SVG source).
 
 ## Styling
 
+### Stroke widths
+
+SVG stroke widths are lengths in the drawing's own units, so they scale with it:
+a drawing placed at `width=1` has thinner lines than the same drawing at
+`width=10`, exactly as when you resize it in a browser. svg2mpl recomputes the
+matplotlib line widths whenever the figure is drawn, so strokes stay in
+proportion when you zoom, resize the figure or save at another DPI.
+Strokes marked `vector-effect="non-scaling-stroke"` keep a fixed width instead.
+
 ### Global keywords
 
 Any extra keyword is forwarded to every drawn artist, so the full matplotlib patch
@@ -81,6 +90,9 @@ vocabulary is available:
 ```python
 svg2mpl.add_svg("drawing.svg", alpha=0.6, linewidth=0.5, edgecolor="black")
 ```
+
+A `linewidth` you pass (globally or per path) is in **points**, like any
+matplotlib line width, and does not scale with the drawing.
 
 ### Per-path overrides
 
@@ -112,6 +124,39 @@ svg2mpl.add_svg("drawing.svg", exclude=r"grid.*", bbox_exclude="background")
 svg2mpl.add_svg("drawing.svg", grayscale=True)
 ```
 
+This converts every color: fills, strokes, gradients, patterns and images.
+
+## Text
+
+Text is converted to glyph outlines with matplotlib's font engine, so it scales,
+rotates, clips and takes gradients exactly like the rest of the drawing.
+`<tspan>`, `<textPath>`, per-character positioning, anchors, baselines, spacing
+and decorations are laid out as in a browser. Fonts are matched against the
+fonts matplotlib can find; generic families (`sans-serif`, `serif`,
+`monospace`) map to matplotlib's defaults.
+
+If you need real text objects instead (for example selectable text in a PDF),
+pass `text_as_paths=False`. Each `<text>` element then becomes a matplotlib
+`Text` artist whose font size is in points and does not follow the drawing's
+scale.
+
+## Effects drawn as images
+
+matplotlib has no compositing, so some SVG effects are evaluated off-screen and
+drawn back as images, positioned and clipped exactly:
+
+- gradients and patterns (clipped to the shape's outline),
+- `<mask>` and `filter` (including CSS filter functions such as `blur()`),
+- `opacity` on a group whose children overlap (so they don't show through each
+  other, as in a browser; non-overlapping children stay vectors).
+
+`raster_resolution` sets the pixel count across the document's larger side used
+for these (default 1024):
+
+```python
+svg2mpl.add_svg("drawing.svg", raster_resolution=2048)
+```
+
 ## Return value & `force_patches`
 
 `add_svg` batches shapes into a single
@@ -127,8 +172,9 @@ patches = svg2mpl.add_svg("drawing.svg", force_patches=True)
 patches["circle1"].set_alpha(0.3)
 ```
 
-Gradient-filled shapes always fall back to individual patches because each needs a
-clipped gradient image.
+Drawings that use clipping, gradients, patterns, masks, filters or images always
+return the `dict` form, because those need more than one artist. The extra
+artists (images) are added to the axes in document order alongside the patches.
 
 ## Inspecting the scene
 
@@ -143,13 +189,14 @@ for text in scene.texts:
     print(text.id, text.content)
 ```
 
-A [`Scene`][svg2mpl.Scene] holds [`Shape`][svg2mpl.Shape] and
-[`Text`][svg2mpl.Text] drawables with their geometry already in document space
-(element transforms and `viewBox` baked in, but **not** the y-flip — that is applied
-at render time). The result of `load` is cached and shared, so treat it as
-read-only.
+A [`Scene`][svg2mpl.Scene] holds its drawables in painter's order in
+`scene.items`: [`Shape`][svg2mpl.Shape] (a path with its matplotlib style, clip
+path and any gradient/pattern paint), [`Image`][svg2mpl.Image] and
+[`Group`][svg2mpl.Group] (a masked or filtered subtree). `scene.shapes` lists
+every shape, and `scene.texts` holds one [`Text`][svg2mpl.Text] record per
+`<text>` element. Geometry is in document space (element transforms and
+`viewBox` baked in, but **not** the y-flip — that is applied at render time).
+The result of `load` is cached and shared, so treat it as read-only.
 
-!!! warning "Best-effort features"
-    **Gradients** are approximated with a clipped image because matplotlib has no
-    native gradient fill, and **`<text>`** uses approximate font matching. See the
-    docstrings in the [API reference](api.md) for current limitations.
+See the [coverage table](index.md#coverage) for what is supported and how the
+few approximations behave.

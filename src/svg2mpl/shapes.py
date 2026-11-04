@@ -8,42 +8,53 @@ coordinate system; transforms are applied later by the scene traversal.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 
 import numpy as np
 from matplotlib.path import Path
+from matplotlib.transforms import Affine2D
 
-from .pathdata import empty_path, parse_path
+from ._xml import strip_ns
+from .geometry import empty_path
+from .pathdata import (
+    ParsedPath,
+    parse_path_data,
+    polyline_path_data,
+)
+from .units import LengthContext, parse_length, parse_numbers
 
-__all__ = ["SHAPE_TAGS", "shape_to_path", "strip_ns"]
+__all__ = [
+    "MARKABLE_TAGS",
+    "SHAPE_TAGS",
+    "shape_to_parsed",
+    "shape_to_path",
+    "strip_ns",
+]
 
 SHAPE_TAGS = frozenset(
     {"path", "rect", "circle", "ellipse", "line", "polyline", "polygon"}
 )
+# Elements that accept marker-start/mid/end.
+MARKABLE_TAGS = frozenset({"path", "line", "polyline", "polygon"})
 
 
-def strip_ns(tag: str) -> str:
-    """Drop an XML namespace from a tag, e.g. ``"{...svg}rect"`` -> ``"rect"``."""
-    return tag.rsplit("}", 1)[-1]
-
-
-_LENGTH_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 # Cubic-Bezier circle approximation constant (4/3 * (sqrt(2) - 1)).
 _KAPPA = 0.5522847498307936
 
 
-def _length(value: str | None, default: float = 0.0) -> float:
-    """Parse an SVG length, ignoring a trailing unit (e.g. ``"3px"`` -> ``3.0``)."""
-    if value is None:
-        return default
-    m = _LENGTH_RE.match(value.strip())
-    return float(m.group()) if m else default
+def _length(
+    value: str | None,
+    default: float = 0.0,
+    axis: str = "other",
+    ctx: LengthContext | None = None,
+) -> float:
+    """Parse an SVG length into user units (``"3px"`` -> ``3.0``, ``"1in"`` -> 96)."""
+    return parse_length(value, default, axis=axis, ctx=ctx)
 
 
 def _points(value: str | None) -> np.ndarray:
     """Parse a ``points`` list into an ``(n, 2)`` array."""
-    nums = [float(m) for m in _LENGTH_RE.findall(value or "")]
+    nums = parse_numbers(value)
     nums = nums[: len(nums) - (len(nums) % 2)]  # drop a dangling coordinate
     return np.array(nums, dtype=float).reshape(-1, 2)
 
@@ -97,55 +108,95 @@ def _rounded_rect(x, y, w, h, rx, ry) -> Path:
     return Path(verts, codes)
 
 
-def _rect(a: Mapping[str, str]) -> Path:
-    x, y = _length(a.get("x")), _length(a.get("y"))
-    w, h = _length(a.get("width")), _length(a.get("height"))
+def _rect(a: Mapping[str, str], ctx=None) -> Path:
+    x, y = _length(a.get("x"), 0, "x", ctx), _length(a.get("y"), 0, "y", ctx)
+    w, h = _length(a.get("width"), 0, "x", ctx), _length(a.get("height"), 0, "y", ctx)
     if w <= 0 or h <= 0:
         return empty_path()
-    rx_attr, ry_attr = a.get("rx"), a.get("ry")
-    rx = _length(rx_attr) if rx_attr is not None else None
-    ry = _length(ry_attr) if ry_attr is not None else None
+
+    def radius(name, axis):
+        v = a.get(name)
+        if v is None or v.strip().lower() == "auto":
+            return None
+        r = _length(v, 0, axis, ctx)
+        return r if r >= 0 else None
+
+    rx, ry = radius("rx", "x"), radius("ry", "y")
     if rx is None and ry is None:
         return Path.unit_rectangle().transformed(_box_transform(x, y, w, h))
+    # One radius given: the other copies it (rx/ry "auto").
     rx = ry if rx is None else rx
     ry = rx if ry is None else ry
-    if rx <= 0 and ry <= 0:
+    if rx is None or ry is None or rx <= 0 or ry <= 0:
         return Path.unit_rectangle().transformed(_box_transform(x, y, w, h))
     return _rounded_rect(x, y, w, h, rx, ry)
 
 
 def _box_transform(x, y, w, h):
-    from matplotlib.transforms import Affine2D
-
     return Affine2D().scale(w, h).translate(x, y)
 
 
 def _ellipse(cx, cy, rx, ry) -> Path:
-    from matplotlib.transforms import Affine2D
-
+    """An ellipse starting at ``(cx + rx, cy)`` and running in the positive
+    angle direction, as the SVG spec defines (this sets the dash phase)."""
     if rx <= 0 or ry <= 0:
         return empty_path()
-    return Path.unit_circle().transformed(Affine2D().scale(rx, ry).translate(cx, cy))
+    k = _KAPPA
+    verts = [
+        (cx + rx, cy),
+        (cx + rx, cy + k * ry),
+        (cx + k * rx, cy + ry),
+        (cx, cy + ry),
+        (cx - k * rx, cy + ry),
+        (cx - rx, cy + k * ry),
+        (cx - rx, cy),
+        (cx - rx, cy - k * ry),
+        (cx - k * rx, cy - ry),
+        (cx, cy - ry),
+        (cx + k * rx, cy - ry),
+        (cx + rx, cy - k * ry),
+        (cx + rx, cy),
+        (cx + rx, cy),
+    ]
+    codes = [Path.MOVETO] + [Path.CURVE4] * 12 + [Path.CLOSEPOLY]
+    return Path(verts, codes)
 
 
-def _line(a: Mapping[str, str]) -> Path:
-    p0 = (_length(a.get("x1")), _length(a.get("y1")))
-    p1 = (_length(a.get("x2")), _length(a.get("y2")))
-    return Path([p0, p1], [Path.MOVETO, Path.LINETO])
+def _line_points(a: Mapping[str, str], ctx=None) -> np.ndarray:
+    return np.array(
+        [
+            (_length(a.get("x1"), 0, "x", ctx), _length(a.get("y1"), 0, "y", ctx)),
+            (_length(a.get("x2"), 0, "x", ctx), _length(a.get("y2"), 0, "y", ctx)),
+        ]
+    )
+
+
+def _line(a: Mapping[str, str], ctx=None) -> Path:
+    return Path(_line_points(a, ctx), [Path.MOVETO, Path.LINETO])
 
 
 def _poly(a: Mapping[str, str], close: bool) -> Path:
-    pts = _points(a.get("points"))
-    if len(pts) == 0:
-        return empty_path()
-    codes = [Path.MOVETO] + [Path.LINETO] * (len(pts) - 1)
-    if close:
-        pts = np.vstack([pts, pts[0]])
-        codes.append(Path.CLOSEPOLY)
-    return Path(pts, codes)
+    return polyline_path_data(_points(a.get("points")), close).path
 
 
-def shape_to_path(tag: str, attrib: Mapping[str, str]) -> Path | None:
+def shape_to_parsed(
+    tag: str, attrib: Mapping[str, str], ctx: LengthContext | None = None
+) -> ParsedPath | None:
+    """Like :func:`shape_to_path` but also returns vertex data (for markers)."""
+    tag = strip_ns(tag)
+    if tag == "path":
+        return parse_path_data(attrib.get("d"))
+    if tag == "line":
+        return polyline_path_data(_line_points(attrib, ctx), closed=False)
+    if tag in ("polyline", "polygon"):
+        return polyline_path_data(_points(attrib.get("points")), tag == "polygon")
+    path = shape_to_path(tag, attrib, ctx)
+    return None if path is None else ParsedPath(path, [])
+
+
+def shape_to_path(
+    tag: str, attrib: Mapping[str, str], ctx: LengthContext | None = None
+) -> Path | None:
     """Convert one SVG shape element to a :class:`Path`.
 
     Parameters
@@ -154,6 +205,8 @@ def shape_to_path(tag: str, attrib: Mapping[str, str]) -> Path | None:
         The element tag, with or without an XML namespace.
     attrib : Mapping
         The element's attributes.
+    ctx : LengthContext, optional
+        Resolves percentages and font-relative units.
 
     Returns
     -------
@@ -162,21 +215,32 @@ def shape_to_path(tag: str, attrib: Mapping[str, str]) -> Path | None:
     """
     tag = strip_ns(tag)
     if tag == "path":
-        return parse_path(attrib.get("d"))
+        return parse_path_data(attrib.get("d")).path
     if tag == "rect":
-        return _rect(attrib)
+        return _rect(attrib, ctx)
+    cx = _length(attrib.get("cx"), 0, "x", ctx)
+    cy = _length(attrib.get("cy"), 0, "y", ctx)
     if tag == "circle":
-        r = _length(attrib.get("r"))
-        return _ellipse(_length(attrib.get("cx")), _length(attrib.get("cy")), r, r)
+        r = _length(attrib.get("r"), 0, "other", ctx)
+        return _ellipse(cx, cy, r, r)
     if tag == "ellipse":
-        return _ellipse(
-            _length(attrib.get("cx")),
-            _length(attrib.get("cy")),
-            _length(attrib.get("rx")),
-            _length(attrib.get("ry")),
+        rx_attr, ry_attr = attrib.get("rx"), attrib.get("ry")
+        auto = ("auto", None)
+        rx = (
+            None
+            if (rx_attr or "auto").strip() in auto
+            else _length(rx_attr, 0, "x", ctx)
         )
+        ry = (
+            None
+            if (ry_attr or "auto").strip() in auto
+            else _length(ry_attr, 0, "y", ctx)
+        )
+        rx = ry if rx is None else rx
+        ry = rx if ry is None else ry
+        return _ellipse(cx, cy, rx or 0.0, ry or 0.0)
     if tag == "line":
-        return _line(attrib)
+        return _line(attrib, ctx)
     if tag == "polyline":
         return _poly(attrib, close=False)
     if tag == "polygon":

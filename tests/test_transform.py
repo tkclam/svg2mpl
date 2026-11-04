@@ -75,7 +75,7 @@ def test_viewbox_transform_scales_to_viewport():
     assert _apply(t, (100, 100)) == (50.0, 50.0)
 
 
-@pytest.mark.parametrize("y,expect", [(0, 100), (100, 0), (25, 75)])
+@pytest.mark.parametrize(("y", "expect"), [(0, 100), (100, 0), (25, 75)])
 def test_flip_y(y, expect):
     t = flip_y_transform(100)
     assert _apply(t, (3, y)) == (3.0, float(expect))
