@@ -11,15 +11,19 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 
 __all__ = [
     "NUMBER_RE",
     "UNITS",
     "LengthContext",
+    "parse_fraction",
     "parse_length",
     "parse_number",
+    "parse_number_pair",
     "parse_numbers",
+    "resolve_region",
     "split_length",
 ]
 
@@ -118,3 +122,61 @@ def parse_number(value: str | None, default: float = 0.0) -> float:
 def parse_numbers(value: str | None) -> list[float]:
     """Return every number in a comma/whitespace separated list."""
     return [float(m) for m in NUMBER_RE.findall(value or "")]
+
+
+def parse_number_pair(
+    value: str | None, default: tuple[float, float] = (0.0, 0.0)
+) -> tuple[float, float]:
+    """Parse ``"a [b]"`` into ``(a, b)``; a single number is used for both."""
+    nums = parse_numbers(value)
+    if not nums:
+        return default
+    return nums[0], nums[1] if len(nums) > 1 else nums[0]
+
+
+def parse_fraction(value: str | None, default: float = 0.0) -> float:
+    """Parse an ``objectBoundingBox`` coordinate: ``"0.5"`` or ``"50%"`` -> 0.5."""
+    if value is None:
+        return default
+    v = value.strip()
+    try:
+        return float(v[:-1]) / 100.0 if v.endswith("%") else float(v)
+    except ValueError:
+        return default
+
+
+Rect = tuple[float, float, float, float]
+
+
+def resolve_region(
+    get: Callable[[str], str | None],
+    units: str,
+    bbox: Rect | None,
+    ctx: LengthContext,
+    default: tuple[str, str, str, str] = ("-10%", "-10%", "120%", "120%"),
+) -> Rect | None:
+    """Resolve an ``x/y/width/height`` region (masks, filters) to user space.
+
+    ``get(name)`` returns an attribute value. With ``objectBoundingBox`` units
+    the values are fractions of ``bbox``; otherwise they are lengths. Returns
+    ``(x0, y0, x1, y1)``, or ``None`` for an empty region or missing bbox.
+    """
+    names = ("x", "y", "width", "height")
+    vals = [get(n) or d for n, d in zip(names, default, strict=True)]
+    if units == "objectBoundingBox":
+        if bbox is None:
+            return None
+        bx0, by0, bx1, by1 = bbox
+        bw, bh = bx1 - bx0, by1 - by0
+        x = bx0 + parse_fraction(vals[0]) * bw
+        y = by0 + parse_fraction(vals[1]) * bh
+        w = parse_fraction(vals[2]) * bw
+        h = parse_fraction(vals[3]) * bh
+    else:
+        x = parse_length(vals[0], 0.0, axis="x", ctx=ctx)
+        y = parse_length(vals[1], 0.0, axis="y", ctx=ctx)
+        w = parse_length(vals[2], 0.0, axis="x", ctx=ctx)
+        h = parse_length(vals[3], 0.0, axis="y", ctx=ctx)
+    if w <= 0 or h <= 0:
+        return None
+    return x, y, x + w, y + h

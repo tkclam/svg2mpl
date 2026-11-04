@@ -13,24 +13,109 @@ clip path per artist. This module bridges both gaps:
 
 from __future__ import annotations
 
+import contextlib
+import math
+from collections.abc import Iterable
+
 import numpy as np
 from matplotlib.path import Path
+from matplotlib.transforms import Affine2D
 
 __all__ = [
-    "split_subpaths",
-    "flatten",
+    "Rect",
+    "area_scale",
+    "axis_scales",
+    "empty_path",
     "evenodd_to_nonzero",
-    "normalize_orientation",
-    "reverse_path",
-    "signed_area",
+    "flatten",
     "intersect_clip",
     "is_convex",
     "join_paths",
-    "rect_path",
+    "normalize_orientation",
     "path_extents",
+    "rect_intersection",
+    "rect_is_empty",
+    "rect_path",
+    "rect_union",
+    "reverse_path",
+    "signed_area",
+    "split_subpaths",
+    "transform_rect",
+    "transform_vector",
 ]
 
+Rect = tuple[float, float, float, float]
+"""An axis-aligned rectangle ``(x0, y0, x1, y1)``."""
+
+_EXTENTS_CACHE = "_svg2mpl_extents"
 _SEG_LEN = {Path.MOVETO: 1, Path.LINETO: 1, Path.CURVE3: 2, Path.CURVE4: 3}
+
+
+# --------------------------------------------------------------------------- #
+# Rectangles and affine scale factors
+# --------------------------------------------------------------------------- #
+def rect_union(a: Rect | None, b: Rect | None) -> Rect | None:
+    """The bounding box of two rectangles (either may be ``None``)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def rect_intersection(a: Rect, b: Rect) -> Rect:
+    """The overlap of two rectangles (possibly empty, see :func:`rect_is_empty`)."""
+    return (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+
+
+def rect_is_empty(r: Rect | None) -> bool:
+    """Whether a rectangle is missing or has no area."""
+    return r is None or r[2] <= r[0] or r[3] <= r[1]
+
+
+def transform_rect(rect: Rect, affine: Affine2D) -> Rect:
+    """The axis-aligned bounding box of ``rect`` mapped through ``affine``."""
+    x0, y0, x1, y1 = rect
+    pts = affine.transform([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+    return (
+        float(pts[:, 0].min()),
+        float(pts[:, 1].min()),
+        float(pts[:, 0].max()),
+        float(pts[:, 1].max()),
+    )
+
+
+def area_scale(affine: Affine2D) -> float:
+    """The mean linear scale of an affine (``sqrt(|det|)``).
+
+    This is how SVG scales lengths such as stroke widths that have no
+    direction.
+    """
+    m = affine.get_matrix()
+    return math.sqrt(abs(m[0, 0] * m[1, 1] - m[0, 1] * m[1, 0]))
+
+
+def axis_scales(affine: Affine2D) -> tuple[float, float]:
+    """How much an affine stretches the x and y unit vectors."""
+    m = affine.get_matrix()
+    return math.hypot(m[0, 0], m[1, 0]), math.hypot(m[0, 1], m[1, 1])
+
+
+def transform_vector(affine: Affine2D, dx: float, dy: float) -> tuple[float, float]:
+    """Map a displacement (no translation) through an affine."""
+    m = affine.get_matrix()
+    return m[0, 0] * dx + m[0, 1] * dy, m[1, 0] * dx + m[1, 1] * dy
+
+
+# --------------------------------------------------------------------------- #
+# Paths
+# --------------------------------------------------------------------------- #
+def empty_path() -> Path:
+    """A vertex-less path (shape ``(0, 2)``), used for degenerate shapes.
+
+    As a clip region it means "clip everything away".
+    """
+    return Path(np.empty((0, 2)))
 
 
 def rect_path(x0: float, y0: float, x1: float, y1: float) -> Path:
@@ -41,11 +126,11 @@ def rect_path(x0: float, y0: float, x1: float, y1: float) -> Path:
     )
 
 
-def join_paths(paths) -> Path:
+def join_paths(paths: Iterable[Path | None]) -> Path:
     """Concatenate paths into one compound path (empty paths are skipped)."""
     paths = [p for p in paths if p is not None and len(p.vertices)]
     if not paths:
-        return Path(np.empty((0, 2)))
+        return empty_path()
     if len(paths) == 1:
         return paths[0]
     return Path.make_compound_path(*paths)
@@ -112,7 +197,7 @@ def path_extents(path: Path):
     """
     if path is None or len(path.vertices) == 0:
         return None
-    cached = getattr(path, "_svg2mpl_extents", None)
+    cached = getattr(path, _EXTENTS_CACHE, None)
     if cached is not None:
         return cached
     verts = np.asarray(path.vertices, float)
@@ -144,10 +229,8 @@ def path_extents(path: Path):
         return None
     lo, hi = pts.min(axis=0), pts.max(axis=0)
     result = (float(lo[0]), float(lo[1]), float(hi[0]), float(hi[1]))
-    try:
-        path._svg2mpl_extents = result
-    except AttributeError:
-        pass
+    with contextlib.suppress(AttributeError):
+        setattr(path, _EXTENTS_CACHE, result)  # paths are immutable in practice
     return result
 
 
@@ -412,10 +495,10 @@ def intersect_clip(a: Path | None, b: Path | None) -> Path | None:
         return a
     ea, eb = path_extents(a), path_extents(b)
     if ea is None or eb is None:
-        return Path(np.empty((0, 2)))
+        return empty_path()
     # Disjoint boxes: empty intersection.
     if ea[2] < eb[0] or eb[2] < ea[0] or ea[3] < eb[1] or eb[3] < ea[1]:
-        return Path(np.empty((0, 2)))
+        return empty_path()
     if is_convex(b):
         return _clip_path_by_convex(a, b)
     if is_convex(a):

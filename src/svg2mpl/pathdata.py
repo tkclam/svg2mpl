@@ -24,6 +24,8 @@ from functools import lru_cache
 import numpy as np
 from matplotlib.path import Path
 
+from .geometry import empty_path
+
 __all__ = [
     "ParsedPath",
     "Subpath",
@@ -37,11 +39,6 @@ __all__ = [
 _NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
 _WS = " \t\r\n\f,"
 _ARGC = {"M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4, "Q": 4, "T": 2, "A": 7}
-
-
-def empty_path() -> Path:
-    """Return a vertex-less path (shape ``(0, 2)``) for degenerate shapes."""
-    return Path(np.empty((0, 2)))
 
 
 @dataclass

@@ -26,24 +26,36 @@ writing modes and bidirectional reordering are not implemented.
 
 from __future__ import annotations
 
+import itertools
+import logging
 import math
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
 import numpy as np
+from matplotlib import font_manager
+from matplotlib.font_manager import FontProperties, findfont, get_font
 from matplotlib.path import Path
+from matplotlib.textpath import TextPath
 from matplotlib.transforms import Affine2D
 
+from ._xml import strip_ns
 from .color import parse_paint
-from .shapes import strip_ns
+from .geometry import empty_path, flatten, join_paths, rect_path
 from .style import font_size
 from .units import LengthContext, parse_length, parse_numbers, split_length
+
+try:  # matplotlib >= 3.10
+    from matplotlib.ft2font import LoadFlags
+
+    _NO_HINTING = LoadFlags.NO_HINTING
+except ImportError:  # pragma: no cover - older matplotlib
+    from matplotlib.ft2font import LOAD_NO_HINTING as _NO_HINTING
 
 __all__ = ["layout_text", "add_texts", "TextRun"]
 
 _XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
-_XLINK = "{http://www.w3.org/1999/xlink}href"
 _ANCHOR_TO_HA = {"start": "left", "middle": "center", "end": "right"}
 _GENERIC = {
     "serif": "serif",
@@ -107,8 +119,6 @@ class _PosEntry:
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=1)
 def _known_families() -> frozenset:
-    from matplotlib import font_manager
-
     return frozenset(f.name.lower() for f in font_manager.fontManager.ttflist)
 
 
@@ -155,8 +165,6 @@ def _font_key(style) -> tuple:
 
 @lru_cache(maxsize=256)
 def _props(key):
-    from matplotlib.font_manager import FontProperties
-
     families, weight, fstyle, stretch = key
     try:
         return FontProperties(
@@ -168,18 +176,15 @@ def _props(key):
 
 @lru_cache(maxsize=256)
 def _ft_font(key):
-    import logging
-
-    from matplotlib.font_manager import findfont, get_font
-
+    # Families were pre-filtered to installed ones, but generic families can
+    # still make findfont log "not found" for each rcParams candidate.
     logger = logging.getLogger("matplotlib.font_manager")
     level = logger.level
     logger.setLevel(logging.ERROR)
     try:
-        font = get_font(findfont(_props(key)))
+        return get_font(findfont(_props(key)))
     finally:
         logger.setLevel(level)
-    return font
 
 
 @lru_cache(maxsize=256)
@@ -187,65 +192,64 @@ def _metrics(key) -> dict:
     """Font metrics as fractions of the em size."""
     font = _ft_font(key)
     em = font.units_per_EM or 1000
-    asc = font.ascender / em
-    desc = font.descender / em
-    upos = getattr(font, "underline_position", -0.1 * em) / em
-    uthick = getattr(font, "underline_thickness", 0.05 * em) / em
-    xh = 0.5
-    try:
-        os2 = font.get_sfnt_table("OS/2")
-        if os2 and os2.get("sxHeight"):
-            xh = os2["sxHeight"] / em
-    except Exception:
-        pass
+    os2 = font.get_sfnt_table("OS/2") or {}
+    x_height = os2.get("sxHeight") or 0.5 * em
     return {
-        "asc": asc,
-        "desc": desc,
-        "upos": upos,
-        "uthick": max(uthick, 0.02),
-        "xh": xh,
+        "asc": font.ascender / em,
+        "desc": font.descender / em,
+        "upos": font.underline_position / em,
+        "uthick": max(font.underline_thickness / em, 0.02),
+        "xh": x_height / em,
     }
 
 
 @lru_cache(maxsize=4096)
 def _glyph(key, ch: str) -> Path:
     """The outline of ``ch`` at size :data:`_REF`, baseline at y=0, y down."""
-    from matplotlib.textpath import TextPath
-
     if ch.isspace():
-        return Path(np.empty((0, 2)))
+        return empty_path()
     try:
         p = TextPath((0, 0), ch, size=_REF, prop=_props(key))
-    except Exception:
-        return Path(np.empty((0, 2)))
+    except (RuntimeError, ValueError):  # no usable glyph in any font
+        return empty_path()
     return p.transformed(Affine2D().scale(1, -1))
+
+
+def _layout_advances(font, text: str) -> list[float] | None:
+    """Kerned advances from matplotlib's text layout (private API, so any
+    mismatch falls back to unkerned advances)."""
+    try:
+        from matplotlib import _text_helpers
+    except ImportError:
+        return None
+    items = list(_text_helpers.layout(text, font))
+    if len(items) != len(text):
+        return None
+    last = items[-1]
+    # The field was renamed from ``glyph_idx`` to ``glyph_index`` in mpl 3.11.
+    index = getattr(last, "glyph_index", getattr(last, "glyph_idx", None))
+    if index is None:
+        return None
+    glyph = last.ft_object.load_glyph(index, flags=_NO_HINTING)
+    xs = [it.x for it in items] + [last.x + glyph.linearHoriAdvance / 65536]
+    return [b - a for a, b in itertools.pairwise(xs)]
 
 
 @lru_cache(maxsize=4096)
 def _advances(key, text: str) -> tuple[float, ...]:
     """Per-character advances (kerning included) at size :data:`_REF`."""
     font = _ft_font(key)
-    try:
-        from matplotlib import _text_helpers
-        from matplotlib.ft2font import LoadFlags
-
-        font.set_size(_REF, 72)
-        items = list(_text_helpers.layout(text, font))
-        if len(items) == len(text):
-            xs = [it.x for it in items]
-            last = items[-1]
-            g = last.ft_object.load_glyph(last.glyph_idx, flags=LoadFlags.NO_HINTING)
-            xs.append(last.x + g.linearHoriAdvance / 65536)
-            return tuple(b - a for a, b in zip(xs[:-1], xs[1:], strict=False))
-    except Exception:
-        pass
-    out = []
     font.set_size(_REF, 72)
+    kerned = _layout_advances(font, text)
+    if kerned is not None:
+        return tuple(kerned)
+    out = []
     for ch in text:
         try:
-            g = font.load_char(ord(ch))
-            out.append(g.linearHoriAdvance / 65536)
-        except Exception:
+            out.append(
+                font.load_char(ord(ch), flags=_NO_HINTING).linearHoriAdvance / 65536
+            )
+        except RuntimeError:  # glyph missing from this font
             out.append(_REF * 0.5)
     return tuple(out)
 
@@ -438,15 +442,9 @@ class _PathMeasure:
     """Arc-length parameterization of a (flattened) path."""
 
     def __init__(self, path: Path):
-        from .geometry import flatten
-
-        pts = []
-        for code_path in [path]:
-            for ring in flatten(code_path):
-                pts.append(ring)
-        # flatten() closes nothing explicitly; use the open polyline of the
-        # first subpath plus any continuation.
-        self.pts = np.vstack(pts) if pts else np.empty((0, 2))
+        # Subpaths are chained into one polyline (rings are not closed).
+        rings = flatten(path)
+        self.pts = np.vstack(rings) if rings else np.empty((0, 2))
         if len(self.pts) >= 2:
             seg = np.diff(self.pts, axis=0)
             self.seglen = np.hypot(seg[:, 0], seg[:, 1])
@@ -634,8 +632,6 @@ def _glyph_transform(g: _Glyph, measures) -> Affine2D | None:
 
 
 def _build_runs(element, glyphs, measures) -> list[TextRun]:
-    from .geometry import join_paths, rect_path
-
     text_id = element.get("id", "")
     runs: list[TextRun] = []
     current = None
@@ -708,52 +704,37 @@ def _rotation_deg(affine: Affine2D) -> float:
     return math.degrees(math.atan2(b, a))
 
 
-def add_texts(ax, scene, *, affine2d, flip, base_transform, zorder=None, texts=None):
+def add_texts(ax, texts, *, placement, base, zorder=3):
     """Render text records as matplotlib ``Text`` artists.
 
-    Glyph sizes are in points and do not follow the drawing's scale; use the
-    default path rendering for faithful sizes.
+    ``placement`` maps document space to data coordinates (y-flip and
+    placement) and ``base`` is usually ``ax.transData``. Glyph sizes are in
+    points and do not follow the drawing's scale; the default path rendering
+    keeps faithful sizes.
     """
     artists = []
-    for text in scene.texts if texts is None else texts:
-        point = text.transform.transform((text.x, text.y))
-        if flip is not None:
-            point = flip.transform(point)
-        point = affine2d.transform(point)
-
+    for text in texts:
+        x, y = (text.transform + placement).transform((text.x, text.y))
         style = text.style
         color = parse_paint(style.get("fill"), default="black")
         if color == "none" or (isinstance(color, str) and color.startswith("url(")):
             color = "black"
         ha = _ANCHOR_TO_HA.get((style.get("text-anchor") or "start").strip(), "left")
         size = font_size(style)
-        rotation = _rotation_deg(text.transform + affine2d)
-
         artist = ax.text(
-            point[0],
-            point[1],
+            x,
+            y,
             text.content,
             color=color,
-            fontsize=size,
             ha=ha,
             va="baseline",
-            rotation=rotation,
+            # Glyphs stay upright: combine placement and content rotation.
+            rotation=_rotation_deg(text.transform + placement),
             rotation_mode="anchor",
-            transform=base_transform,
-            zorder=zorder if zorder is not None else 3,
+            transform=base,
+            zorder=zorder,
+            fontproperties=_props(_font_key(style)),
         )
-        artist.set_fontproperties(_props(_font_key(style)))
         artist.set_fontsize(size)
         artists.append(artist)
     return artists
-
-
-def text_anchor_points(scene, *, affine2d, flip) -> np.ndarray:
-    """Return the placed anchor points of all texts (for bbox inclusion)."""
-    pts = []
-    for text in scene.texts:
-        p = text.transform.transform((text.x, text.y))
-        if flip is not None:
-            p = flip.transform(p)
-        pts.append(affine2d.transform(p))
-    return np.array(pts) if pts else np.empty((0, 2))

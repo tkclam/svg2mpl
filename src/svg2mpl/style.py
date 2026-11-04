@@ -25,7 +25,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from .color import NONE, parse_color, parse_paint
+from .color import NONE, parse_color, parse_paint, with_alpha
 from .units import DEFAULT_FONT_SIZE, LengthContext, parse_length, split_length
 
 __all__ = [
@@ -388,9 +388,6 @@ def opacity(value: str | None, default: float = 1.0) -> float:
     return _clamp01(_float(v, default))
 
 
-_opacity = opacity  # backwards-compatible private alias
-
-
 def _is_url(color) -> bool:
     return isinstance(color, str) and color.lower().startswith("url(")
 
@@ -401,16 +398,6 @@ def _own_alpha(color) -> float:
     from matplotlib.colors import to_rgba
 
     return to_rgba(color)[3]
-
-
-def _apply_alpha(color, alpha: float):
-    """Fold ``alpha`` into a color, leaving ``none`` and ``url(...)`` untouched."""
-    if color == NONE or _is_url(color):
-        return color
-    from matplotlib.colors import to_rgba
-
-    r, g, b, a = to_rgba(color)
-    return (r, g, b, a * alpha)
 
 
 def dash_array(value: str | None, ctx: LengthContext | None = None):
@@ -480,8 +467,8 @@ def style_to_kwargs(
     else:
         # Per-paint opacity must be baked into the colors (a single patch alpha
         # would clobber them), so this element falls off the fast path.
-        kwargs["facecolor"] = _apply_alpha(facecolor, element_opacity * fill_opacity)
-        kwargs["edgecolor"] = _apply_alpha(edgecolor, element_opacity * stroke_opacity)
+        kwargs["facecolor"] = with_alpha(facecolor, element_opacity * fill_opacity)
+        kwargs["edgecolor"] = with_alpha(edgecolor, element_opacity * stroke_opacity)
 
     if "stroke-linecap" in style:
         kwargs["capstyle"] = _LINECAP.get(style["stroke-linecap"].strip().lower())

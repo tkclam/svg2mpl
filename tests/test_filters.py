@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from svg2mpl.filters import Filter, apply_filter, gaussian_blur
+from svg2mpl._filter_ops import gaussian_blur
+from svg2mpl.filters import Filter, apply_filter
 
 REGION = (0.0, 0.0, 10.0, 10.0)
 

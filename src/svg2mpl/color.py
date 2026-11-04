@@ -7,25 +7,33 @@ job here is mostly to recognise the SVG-specific spellings (``rgb()``, ``hsl()``
 
 from __future__ import annotations
 
+import math
 import re
 from colorsys import hls_to_rgb
 
+import numpy as np
+from matplotlib.colors import is_color_like, to_rgb, to_rgba
+
 __all__ = [
     "NONE",
+    "gray_image",
+    "gray_rgba",
     "parse_color",
     "parse_paint",
     "parse_url_ref",
     "split_paint",
     "to_grayscale",
+    "with_alpha",
 ]
 
 # Sentinel for "no paint" -- matplotlib understands the string "none".
 NONE = "none"
+# Rec. 601 luma weights used for grayscale conversion.
+_LUMA = (0.2989, 0.5870, 0.1140)
 
 _URL_RE = re.compile(r"url\(\s*#([^)\s]+)\s*\)", re.IGNORECASE)
 _RGB_RE = re.compile(r"rgba?\(([^)]*)\)", re.IGNORECASE)
 _HSL_RE = re.compile(r"hsla?\(([^)]*)\)", re.IGNORECASE)
-_NUM_RE = re.compile(r"[-+]?\d*\.?\d+%?")
 
 
 def parse_url_ref(value: str | None) -> str | None:
@@ -168,8 +176,6 @@ def _parse_color(value: str, low: str):
             return (r, g, b)
         raise ValueError(value)
 
-    from matplotlib.colors import is_color_like
-
     if low.startswith("#"):
         digits = low[1:]
         if len(digits) in (3, 4) and all(c in "0123456789abcdef" for c in digits):
@@ -192,18 +198,43 @@ def _hue(token: str) -> float:
     if t.endswith("grad"):
         return float(t[:-4]) / 400.0
     if t.endswith("rad"):
-        import math
-
         return float(t[:-3]) / (2 * math.pi)
     if t.endswith("turn"):
         return float(t[:-4])
     return float(t) / 360.0
 
 
+def with_alpha(color, alpha: float):
+    """Multiply ``alpha`` into a color (``"none"`` and ``url()`` pass through)."""
+    if color == NONE or (isinstance(color, str) and color.lower().startswith("url(")):
+        return color
+    if alpha == 1.0:
+        return color
+    r, g, b, a = to_rgba(color)
+    return (r, g, b, a * alpha)
+
+
 def to_grayscale(color) -> tuple[float, float, float]:
     """Convert a matplotlib color to its luminance-preserving gray equivalent."""
-    from matplotlib.colors import to_rgb
-
     r, g, b = to_rgb(color)
-    v = 0.2989 * r + 0.5870 * g + 0.1140 * b
+    v = _LUMA[0] * r + _LUMA[1] * g + _LUMA[2] * b
     return (v, v, v)
+
+
+def gray_rgba(color):
+    """Grayscale version of a color, keeping its alpha (``"none"`` passes)."""
+    if color is None or (isinstance(color, str) and color.lower() == "none"):
+        return color
+    r, g, b, a = to_rgba(color)
+    v = to_grayscale((r, g, b))[0]
+    return (v, v, v, a)
+
+
+def gray_image(rgba: np.ndarray) -> np.ndarray:
+    """Grayscale copy of an RGBA image (uint8 input is scaled to ``[0, 1]``)."""
+    out = np.array(rgba, dtype=float)
+    if out.max() > 1.0:
+        out /= 255.0
+    v = out[..., :3] @ np.asarray(_LUMA)
+    out[..., 0] = out[..., 1] = out[..., 2] = v
+    return out

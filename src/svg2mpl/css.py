@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .shapes import strip_ns
+from ._xml import strip_ns
 
 __all__ = ["compute_css_declarations", "css_available"]
 

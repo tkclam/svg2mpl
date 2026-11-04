@@ -21,21 +21,16 @@ import numpy as np
 from matplotlib.transforms import Affine2D
 
 from .color import parse_color
-from .shapes import strip_ns
+from ._xml import href, strip_ns
 from .transform import parse_transform, parse_viewbox
 from .units import LengthContext, parse_length
 
 __all__ = ["Gradient", "Pattern", "parse_gradients", "add_gradient_fill"]
 
-_XLINK = "{http://www.w3.org/1999/xlink}href"
 _LINEAR_DEFAULTS = {"x1": "0%", "y1": "0%", "x2": "100%", "y2": "0%"}
 _RADIAL_DEFAULTS = {"cx": "50%", "cy": "50%", "r": "50%", "fr": "0%"}
 _AXIS = {"x1": "x", "x2": "x", "cx": "x", "fx": "x", "y1": "y", "y2": "y"}
 _AXIS.update({"cy": "y", "fy": "y"})
-
-
-def _href(el):
-    return el.get(_XLINK) or el.get("href")
 
 
 def _stop(element, style) -> tuple[float, tuple[float, float, float, float]]:
@@ -259,8 +254,8 @@ def parse_gradients(root, style_of=None, ctx: LengthContext | None = None) -> di
         while gid in raw and gid not in seen:
             seen.add(gid)
             out.append(raw[gid])
-            href = _href(raw[gid][1])
-            gid = href[1:] if href and href.startswith("#") else None
+            ref = href(raw[gid][1])
+            gid = ref[1:] if ref and ref.startswith("#") else None
         return out
 
     def first_attr(links, name, kinds=None):

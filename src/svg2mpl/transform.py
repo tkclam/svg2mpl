@@ -17,9 +17,13 @@ from __future__ import annotations
 import math
 import re
 
+import numpy as np
 from matplotlib.transforms import Affine2D
 
+from .units import parse_numbers
+
 __all__ = [
+    "parse_angles",
     "parse_transform",
     "parse_viewbox",
     "parse_preserve_aspect_ratio",
@@ -35,17 +39,17 @@ _FUNC_RE = re.compile(
     r"skewX|skewY|skew)\s*\(([^)]*)\)",
     re.IGNORECASE,
 )
-_NUM_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?([a-zA-Z%]*)")
+_NUM_UNIT_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?([a-zA-Z%]*)")
 _ANGLE_UNITS = {"": 1.0, "deg": 1.0, "rad": 180.0 / math.pi, "grad": 0.9, "turn": 360.0}
 
 
-def _numbers(text: str) -> list[float]:
+def parse_angles(text: str | None) -> list[float]:
     """Return every number in ``text`` (commas and whitespace are separators).
 
     Angle units are converted to degrees; length units are dropped.
     """
     out = []
-    for m in _NUM_RE.finditer(text):
+    for m in _NUM_UNIT_RE.finditer(text or ""):
         unit = m.group(1).lower()
         num = float(m.group()[: len(m.group()) - len(m.group(1))])
         out.append(num * _ANGLE_UNITS.get(unit, 1.0))
@@ -112,25 +116,25 @@ def parse_transform(value: str | None) -> Affine2D:
     Affine2D
         Identity when ``value`` is empty or ``None``.
     """
-    result = Affine2D()
+    matrix = np.eye(3)
     if not value:
-        return result
+        return Affine2D()
     for name, args in _FUNC_RE.findall(value):
         try:
-            m = _func_to_affine(name, _numbers(args))
+            m = _func_to_affine(name, parse_angles(args))
         except ValueError:
             return Affine2D()  # an invalid list disables the whole attribute
-        # Fold so that the left-most SVG function is applied last (outermost):
-        # ``result`` accumulates the already-seen (more inner) functions.
-        result = m + result
-    return result
+        # The left-most SVG function is the outermost, so each new (inner)
+        # function multiplies on the right.
+        matrix = matrix @ m.get_matrix()
+    return Affine2D(matrix)
 
 
 def parse_viewbox(value: str | None) -> tuple[float, float, float, float] | None:
     """Parse a ``viewBox`` attribute into ``(min_x, min_y, width, height)``."""
     if not value:
         return None
-    nums = _numbers(value)
+    nums = parse_numbers(value)
     if len(nums) != 4:
         return None
     return nums[0], nums[1], nums[2], nums[3]

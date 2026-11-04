@@ -20,7 +20,30 @@ import numpy as np
 from matplotlib.path import Path
 from matplotlib.transforms import Affine2D
 
-__all__ = ["Shape", "Image", "Group", "Mask", "Text", "Scene", "BoundPaint"]
+__all__ = [
+    "BoundPaint",
+    "Group",
+    "Image",
+    "Mask",
+    "PatternTile",
+    "Scene",
+    "Shape",
+    "Text",
+]
+
+
+@dataclass
+class PatternTile:
+    """A pattern's tile content, resolved for one referencing element.
+
+    ``items`` are drawn in tile space, which spans ``[0, width] x [0, height]``
+    and maps to document space through ``transform``.
+    """
+
+    items: list
+    width: float
+    height: float
+    transform: Affine2D
 
 
 @dataclass
@@ -37,7 +60,7 @@ class BoundPaint:
     bbox: tuple[float, float, float, float] | None
     opacity: float = 1.0
     # For patterns: the tile content, resolved for this element.
-    tile: Any = None
+    tile: PatternTile | None = None
 
     def average_color(self):
         color = self.server.average_color()

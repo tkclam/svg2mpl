@@ -14,9 +14,10 @@ from collections.abc import Mapping
 import numpy as np
 from matplotlib.path import Path
 
+from ._xml import strip_ns
+from .geometry import empty_path
 from .pathdata import (
     ParsedPath,
-    empty_path,
     parse_path_data,
     polyline_path_data,
 )
@@ -35,11 +36,6 @@ SHAPE_TAGS = frozenset(
 )
 # Elements that accept marker-start/mid/end.
 MARKABLE_TAGS = frozenset({"path", "line", "polyline", "polygon"})
-
-
-def strip_ns(tag: str) -> str:
-    """Drop an XML namespace from a tag, e.g. ``"{...svg}rect"`` -> ``"rect"``."""
-    return tag.rsplit("}", 1)[-1]
 
 
 _LENGTH_RE = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?")
