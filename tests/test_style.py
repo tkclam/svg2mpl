@@ -2,6 +2,7 @@ from svg2mpl.style import (
     compute_style,
     declarations,
     is_hidden,
+    is_invisible,
     parse_style_attr,
     style_to_kwargs,
 )
@@ -82,5 +83,11 @@ def test_dasharray_odd_count_is_doubled():
 
 def test_is_hidden():
     assert is_hidden({"display": "none"})
-    assert is_hidden({"visibility": "hidden"})
+    assert not is_hidden({"visibility": "hidden"})  # only display prunes
     assert not is_hidden({"fill": "red"})
+
+
+def test_is_invisible():
+    assert is_invisible({"visibility": "hidden"})
+    assert is_invisible({"visibility": "collapse"})
+    assert not is_invisible({"visibility": "visible"})

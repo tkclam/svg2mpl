@@ -20,6 +20,10 @@ Everything below is importable directly from the top-level `svg2mpl` package.
 
 ::: svg2mpl.Text
 
+::: svg2mpl.Image
+
+::: svg2mpl.Group
+
 ## Geometry helpers
 
 These lower-level helpers back `add_svg` and are exposed for advanced use.

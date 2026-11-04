@@ -67,3 +67,41 @@ def test_image_gradients():
     ax.set_aspect("equal")
     ax.set_axis_off()
     return fig
+
+
+FEATURES = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <defs>
+    <clipPath id="c"><circle cx="50" cy="50" r="40"/></clipPath>
+    <pattern id="dots" width="10" height="10" patternUnits="userSpaceOnUse">
+      <circle cx="5" cy="5" r="3" fill="crimson"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="10" refY="5" markerWidth="6"
+            markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="navy"/>
+    </marker>
+    <linearGradient id="fade"><stop offset="0" stop-color="white"/>
+      <stop offset="1" stop-color="black"/></linearGradient>
+    <mask id="m"><rect x="110" y="10" width="80" height="80" fill="url(#fade)"/></mask>
+    <filter id="shadow"><feDropShadow dx="3" dy="3" stdDeviation="2"/></filter>
+  </defs>
+  <g clip-path="url(#c)">
+    <rect width="100" height="100" fill="orange"/>
+    <rect width="50" height="50" fill="navy"/>
+  </g>
+  <rect x="110" y="10" width="80" height="80" fill="teal" mask="url(#m)"/>
+  <rect x="10" y="110" width="80" height="40" fill="url(#dots)" stroke="black"/>
+  <path d="M20 180 L80 180" stroke="black" stroke-width="2"
+        marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+  <circle cx="150" cy="130" r="20" fill="gold" filter="url(#shadow)"/>
+  <text x="150" y="185" font-family="DejaVu Sans" font-size="18"
+        text-anchor="middle" fill="purple">Text</text>
+</svg>"""
+
+
+@pytest.mark.mpl_image_compare(baseline_dir="baseline", tolerance=20)
+def test_image_features():
+    fig, ax = plt.subplots(figsize=(4, 4))
+    svg2mpl.add_svg(FEATURES, ax=ax, place=False)
+    ax.set_aspect("equal")
+    ax.set_axis_off()
+    return fig

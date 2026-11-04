@@ -16,9 +16,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-    "matplotlib",
+    "matplotlib>=3.6",
     "numpy",
-    "svgpath2mpl",
+    "pillow",
 ]
 
 [project.optional-dependencies]

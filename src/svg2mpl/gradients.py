@@ -1,11 +1,16 @@
-"""Parse SVG gradients and render them as clipped images.
+"""Parse SVG paint servers (gradients and patterns) and render gradients.
 
 matplotlib has no native gradient fill for arbitrary paths, so a gradient is
-drawn as a small RGBA image (evaluated from the gradient stops) clipped to the
-shape's outline. ``objectBoundingBox`` gradients (the default) are reproduced
-faithfully under translation/scale; ``userSpaceOnUse`` and rotated placements are
-best-effort. :meth:`Gradient.average_color` provides a solid-color fallback for
-the batched fast path.
+drawn as an RGBA image evaluated per pixel from the gradient definition and
+clipped to the shape's outline. Evaluation happens in the referencing
+element's user space, so ``objectBoundingBox`` and ``userSpaceOnUse`` units,
+``gradientTransform``, rotated/skewed elements, ``spreadMethod``
+(``pad``/``reflect``/``repeat``) and radial focal points (``fx``/``fy``/``fr``)
+are all reproduced. :meth:`Gradient.average_color` provides a solid-color
+fallback.
+
+Patterns are parsed into :class:`Pattern` definitions here; their tile content
+is resolved by the parser and rasterized by the renderer.
 """
 
 from __future__ import annotations
@@ -15,34 +20,46 @@ from dataclasses import dataclass, field
 import numpy as np
 from matplotlib.transforms import Affine2D
 
-from .color import parse_paint
+from .color import parse_color
 from .shapes import strip_ns
-from .transform import parse_transform
+from .transform import parse_transform, parse_viewbox
+from .units import LengthContext, parse_length
 
-__all__ = ["Gradient", "parse_gradients", "add_gradient_fill"]
+__all__ = ["Gradient", "Pattern", "parse_gradients", "add_gradient_fill"]
 
 _XLINK = "{http://www.w3.org/1999/xlink}href"
+_LINEAR_DEFAULTS = {"x1": "0%", "y1": "0%", "x2": "100%", "y2": "0%"}
+_RADIAL_DEFAULTS = {"cx": "50%", "cy": "50%", "r": "50%", "fr": "0%"}
+_AXIS = {"x1": "x", "x2": "x", "cx": "x", "fx": "x", "y1": "y", "y2": "y"}
+_AXIS.update({"cy": "y", "fy": "y"})
 
 
-def _stop_rgba(element) -> tuple[float, tuple[float, float, float, float]]:
-    """Return ``(offset, rgba)`` for a ``<stop>`` element."""
+def _href(el):
+    return el.get(_XLINK) or el.get("href")
+
+
+def _stop(element, style) -> tuple[float, tuple[float, float, float, float]]:
+    """Return ``(offset, rgba)`` for a ``<stop>`` with its computed style."""
     from matplotlib.colors import to_rgba
 
-    attrib = element.attrib
-    style = {}
-    for decl in (attrib.get("style") or "").split(";"):
-        if ":" in decl:
-            k, _, v = decl.partition(":")
-            style[k.strip()] = v.strip()
-    offset = attrib.get("offset", style.get("offset", "0"))
-    off = float(offset[:-1]) / 100.0 if offset.strip().endswith("%") else float(offset)
-    color = parse_paint(
-        attrib.get("stop-color", style.get("stop-color", "black")), default="black"
+    from .style import opacity
+
+    offset = element.attrib.get("offset", style.get("offset", "0")).strip()
+    try:
+        off = float(offset[:-1]) / 100.0 if offset.endswith("%") else float(offset)
+    except ValueError:
+        off = 0.0
+    current = parse_color(style.get("color"), default="black")
+    if current == "none":
+        current = "black"
+    color = parse_color(
+        style.get("stop-color", "black"), current_color=current, default="black"
     )
-    op = attrib.get("stop-opacity", style.get("stop-opacity", "1"))
-    alpha = float(op[:-1]) / 100.0 if op.strip().endswith("%") else float(op)
-    rgba = to_rgba(color, alpha)
-    return min(max(off, 0.0), 1.0), rgba
+    if color == "none":
+        color = (0.0, 0.0, 0.0, 0.0)
+    r, g, b, a = to_rgba(color)
+    a *= opacity(style.get("stop-opacity"))
+    return min(max(off, 0.0), 1.0), (r, g, b, a)
 
 
 @dataclass
@@ -54,6 +71,10 @@ class Gradient:
     units: str = "objectBoundingBox"
     transform: Affine2D = field(default_factory=Affine2D)
     coords: dict = field(default_factory=dict)
+    spread: str = "pad"
+    id: str = ""
+    # Resolved defaults for omitted coordinates (userSpaceOnUse percentages).
+    defaults: dict = field(default_factory=dict)
 
     def average_color(self):
         """A representative solid color (mean of the stops), for fallbacks."""
@@ -63,9 +84,14 @@ class Gradient:
         return tuple(arr.mean(axis=0))
 
     def color_at(self, t: np.ndarray) -> np.ndarray:
-        """Evaluate the stop ramp at parameter(s) ``t`` in ``[0, 1]``."""
+        """Evaluate the stop ramp at parameter(s) ``t`` (spread applied)."""
+        t = np.asarray(t, dtype=float)
         if not self.stops:
             return np.zeros(t.shape + (4,))
+        if self.spread == "repeat":
+            t = np.mod(t, 1.0)
+        elif self.spread == "reflect":
+            t = np.abs(np.mod(t + 1.0, 2.0) - 1.0)
         offs = np.array([o for o, _ in self.stops])
         cols = np.array([c for _, c in self.stops])
         t = np.clip(t, 0.0, 1.0)
@@ -74,106 +100,258 @@ class Gradient:
             out[..., ch] = np.interp(t, offs, cols[:, ch])
         return out
 
+    def _coord(self, name: str) -> float:
+        if name in self.coords:
+            return self.coords[name]
+        if name == "fx":
+            return self._coord("cx")
+        if name == "fy":
+            return self._coord("cy")
+        if name in self.defaults:
+            return self.defaults[name]
+        defaults = _LINEAR_DEFAULTS if self.kind == "linear" else _RADIAL_DEFAULTS
+        return _fraction(defaults[name])
+
     def _param(self, pts: np.ndarray) -> np.ndarray:
-        """Map gradient-space points to the ramp parameter ``t``."""
+        """Map gradient-space points to the ramp parameter ``t`` (NaN = no paint)."""
         if self.kind == "linear":
-            x1 = self.coords.get("x1", 0.0)
-            y1 = self.coords.get("y1", 0.0)
-            x2 = self.coords.get("x2", 1.0)
-            y2 = self.coords.get("y2", 0.0)
+            x1, y1 = self._coord("x1"), self._coord("y1")
+            x2, y2 = self._coord("x2"), self._coord("y2")
             d = np.array([x2 - x1, y2 - y1])
-            denom = float(d @ d) or 1.0
+            denom = float(d @ d)
+            if denom == 0:
+                return np.ones(pts.shape[:-1])  # degenerate: last stop color
             return ((pts - [x1, y1]) @ d) / denom
-        cx = self.coords.get("cx", 0.5)
-        cy = self.coords.get("cy", 0.5)
-        r = self.coords.get("r", 0.5) or 1e-9
-        return np.hypot(pts[..., 0] - cx, pts[..., 1] - cy) / r
+        cx, cy, r = self._coord("cx"), self._coord("cy"), self._coord("r")
+        fx, fy, fr = self._coord("fx"), self._coord("fy"), self._coord("fr")
+        if r <= 0:
+            return np.ones(pts.shape[:-1])
+        # SVG 1.1: a focal point outside the end circle is moved onto it.
+        fdx, fdy = fx - cx, fy - cy
+        fd = np.hypot(fdx, fdy)
+        if fr == 0 and fd > r * 0.999:
+            k = r * 0.999 / fd
+            fx, fy = cx + fdx * k, cy + fdy * k
+        if fx == cx and fy == cy and fr == 0:
+            return np.hypot(pts[..., 0] - cx, pts[..., 1] - cy) / r
+        # Two-point conical gradient: largest t with |p - c(t)| = r(t) >= 0.
+        cdx, cdy, dr = cx - fx, cy - fy, r - fr
+        px, py = pts[..., 0] - fx, pts[..., 1] - fy
+        a = cdx * cdx + cdy * cdy - dr * dr
+        b = px * cdx + py * cdy + fr * dr
+        c = px * px + py * py - fr * fr
+        if abs(a) < 1e-12:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t = c / (2 * b)
+        else:
+            disc = b * b - a * c
+            with np.errstate(invalid="ignore"):
+                sq = np.sqrt(np.where(disc >= 0, disc, np.nan))
+            t1, t2 = (b + sq) / a, (b - sq) / a
+            t = np.fmax(t1, t2)
+            bad = fr + t * dr < 0
+            t = np.where(bad, np.fmin(t1, t2), t)
+        return t
+
+    def evaluate(self, user_pts: np.ndarray, bbox=None) -> np.ndarray:
+        """RGBA at points given in the referencing element's user space."""
+        pts = np.asarray(user_pts, dtype=float)
+        if self.units == "objectBoundingBox":
+            if bbox is None:
+                return np.zeros(pts.shape[:-1] + (4,))
+            x0, y0, x1, y1 = bbox
+            w, h = (x1 - x0), (y1 - y0)
+            if w == 0 or h == 0:
+                return np.zeros(pts.shape[:-1] + (4,))
+            pts = np.stack([(pts[..., 0] - x0) / w, (pts[..., 1] - y0) / h], axis=-1)
+        try:
+            inv = self.transform.inverted()
+            pts = inv.transform(pts.reshape(-1, 2)).reshape(pts.shape)
+        except Exception:
+            return np.zeros(pts.shape[:-1] + (4,))
+        t = self._param(pts)
+        out = self.color_at(np.nan_to_num(t, nan=0.0))
+        out[np.isnan(t)] = 0.0
+        return out
 
     def render_image(self, bbox, res: int = 256) -> np.ndarray:
-        """Render the gradient as an ``(res, res, 4)`` RGBA image over ``bbox``."""
+        """Render the gradient as an ``(res, res, 4)`` RGBA image over ``bbox``.
+
+        ``bbox`` (a matplotlib ``Bbox``) is both the sampled area and, for
+        ``objectBoundingBox`` gradients, the object box. Row 0 is ``bbox.y0``.
+        """
         x0, y0, x1, y1 = bbox.x0, bbox.y0, bbox.x1, bbox.y1
         xs = np.linspace(x0, x1, res)
         ys = np.linspace(y0, y1, res)
         gx, gy = np.meshgrid(xs, ys)
-        if self.units == "objectBoundingBox":
-            w = (x1 - x0) or 1.0
-            h = (y1 - y0) or 1.0
-            pts = np.stack([(gx - x0) / w, (gy - y0) / h], axis=-1)
-        else:  # userSpaceOnUse (best-effort: assume image space == user space)
-            pts = np.stack([gx, gy], axis=-1)
-        # Undo the gradientTransform to evaluate in the gradient's own space.
-        try:
-            inv = self.transform.inverted()
-            flat = inv.transform(pts.reshape(-1, 2))
-            pts = flat.reshape(pts.shape)
-        except Exception:
-            pass
-        return self.color_at(self._param(pts))
+        return self.evaluate(np.stack([gx, gy], axis=-1), (x0, y0, x1, y1))
 
 
-def _coords(element, kind) -> dict:
+@dataclass
+class Pattern:
+    """A parsed ``<pattern>`` (attributes resolved through ``href`` chains)."""
+
+    id: str
+    element: object  # the element whose children form the tile
+    x: str = "0"
+    y: str = "0"
+    width: str = "0"
+    height: str = "0"
+    units: str = "objectBoundingBox"
+    content_units: str = "userSpaceOnUse"
+    viewbox: tuple | None = None
+    preserve_aspect_ratio: str | None = None
+    transform: Affine2D = field(default_factory=Affine2D)
+    color: tuple | str = "none"
+
+    def average_color(self):
+        return self.color
+
+
+def _fraction(value: str) -> float:
+    v = value.strip()
+    return float(v[:-1]) / 100.0 if v.endswith("%") else float(v)
+
+
+def _coords(raw: dict, units: str, ctx: LengthContext) -> dict:
     out = {}
-    names = (
-        ("x1", "y1", "x2", "y2") if kind == "linear" else ("cx", "cy", "r", "fx", "fy")
-    )
-    for name in names:
-        if name in element.attrib:
-            val = element.attrib[name].strip()
-            out[name] = float(val[:-1]) / 100.0 if val.endswith("%") else float(val)
+    for name, val in raw.items():
+        try:
+            if units == "objectBoundingBox":
+                out[name] = _fraction(val)
+            else:
+                out[name] = parse_length(
+                    val, 0.0, axis=_AXIS.get(name, "other"), ctx=ctx
+                )
+        except ValueError:
+            continue
     return out
 
 
-def parse_gradients(root) -> dict[str, Gradient]:
-    """Parse every ``<linearGradient>``/``<radialGradient>`` keyed by id.
+def parse_gradients(root, style_of=None, ctx: LengthContext | None = None) -> dict:
+    """Parse every gradient and pattern keyed by id.
 
     Handles ``xlink:href``/``href`` inheritance of stops and attributes.
+    ``style_of(element)`` returns an element's computed style (used for stop
+    colors set via CSS); by default only attributes and inline styles are used.
     """
+    from .style import compute_style, declarations
+
+    ctx = ctx or LengthContext()
+    if style_of is None:
+
+        def style_of(el, _parent=None):
+            return compute_style(declarations(el.attrib), None)
+
     raw = {}
     for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
         tag = strip_ns(el.tag)
-        if tag in ("linearGradient", "radialGradient") and el.get("id"):
+        if tag in ("linearGradient", "radialGradient", "pattern") and el.get("id"):
             raw[el.get("id")] = (tag, el)
 
-    resolved: dict[str, Gradient] = {}
+    resolved: dict = {}
 
-    def build(gid, seen):
-        if gid in resolved:
-            return resolved[gid]
-        if gid not in raw or gid in seen:
-            return None
-        seen.add(gid)
-        tag, el = raw[gid]
+    def chain(gid):
+        """The href chain starting at ``gid`` (cycle-safe)."""
+        out, seen = [], set()
+        while gid in raw and gid not in seen:
+            seen.add(gid)
+            out.append(raw[gid])
+            href = _href(raw[gid][1])
+            gid = href[1:] if href and href.startswith("#") else None
+        return out
+
+    def first_attr(links, name, kinds=None):
+        for tag, el in links:
+            if kinds and tag not in kinds:
+                continue
+            if name in el.attrib:
+                return el.attrib[name]
+        return None
+
+    for gid, (tag, _el) in raw.items():
+        links = chain(gid)
+        if tag == "pattern":
+            resolved[gid] = _build_pattern(gid, links, first_attr, style_of)
+            continue
         kind = "linear" if tag == "linearGradient" else "radial"
-
-        parent = None
-        href = el.get(_XLINK) or el.get("href")
-        if href and href.startswith("#"):
-            parent = build(href[1:], seen)
-
-        stops = [_stop_rgba(c) for c in el if strip_ns(c.tag) == "stop"]
-        if not stops and parent is not None:
-            stops = list(parent.stops)
-
-        units = el.get("gradientUnits") or (
-            parent.units if parent else "objectBoundingBox"
+        stops = []
+        for _t, link in links:
+            kids = [
+                c for c in link if isinstance(c.tag, str) and strip_ns(c.tag) == "stop"
+            ]
+            if kids:
+                stops = [_stop(c, style_of(c)) for c in kids]
+                break
+        # Offsets must be monotonic.
+        last = 0.0
+        for i, (off, rgba) in enumerate(stops):
+            last = max(last, off)
+            stops[i] = (last, rgba)
+        grad_kinds = ("linearGradient", "radialGradient")
+        units = first_attr(links, "gradientUnits", grad_kinds) or "objectBoundingBox"
+        tr = first_attr(links, "gradientTransform", grad_kinds)
+        transform = parse_transform(tr) if tr else Affine2D()
+        spread = (first_attr(links, "spreadMethod", grad_kinds) or "pad").strip()
+        names = (
+            ("x1", "y1", "x2", "y2")
+            if kind == "linear"
+            else ("cx", "cy", "r", "fx", "fy", "fr")
         )
-        if "gradientTransform" in el.attrib:
-            transform = parse_transform(el.attrib["gradientTransform"])
-        else:
-            transform = parent.transform if parent else Affine2D()
-
-        coords = dict(parent.coords) if parent else {}
-        coords.update(_coords(el, kind))
-
-        grad = Gradient(
-            kind=kind, stops=stops, units=units, transform=transform, coords=coords
+        raw_coords = {}
+        for n in names:
+            v = first_attr(links, n, (tag,))
+            if v is not None:
+                raw_coords[n] = v
+        table = _LINEAR_DEFAULTS if kind == "linear" else _RADIAL_DEFAULTS
+        defaults = _coords(table, units, ctx) if units == "userSpaceOnUse" else {}
+        resolved[gid] = Gradient(
+            defaults=defaults,
+            kind=kind,
+            stops=stops,
+            units=units,
+            transform=transform,
+            coords=_coords(raw_coords, units, ctx),
+            spread=spread if spread in ("pad", "reflect", "repeat") else "pad",
+            id=gid,
         )
-        resolved[gid] = grad
-        return grad
-
-    for gid in raw:
-        build(gid, set())
     return resolved
+
+
+def _build_pattern(gid, links, first_attr, style_of) -> Pattern:
+    kinds = ("pattern",)
+    content = links[0][1]
+    for _t, el in links:
+        if any(isinstance(c.tag, str) for c in el):
+            content = el
+            break
+    tr = first_attr(links, "patternTransform", kinds)
+    pattern = Pattern(
+        id=gid,
+        element=content,
+        x=first_attr(links, "x", kinds) or "0",
+        y=first_attr(links, "y", kinds) or "0",
+        width=first_attr(links, "width", kinds) or "0",
+        height=first_attr(links, "height", kinds) or "0",
+        units=first_attr(links, "patternUnits", kinds) or "objectBoundingBox",
+        content_units=first_attr(links, "patternContentUnits", kinds)
+        or "userSpaceOnUse",
+        viewbox=parse_viewbox(first_attr(links, "viewBox", kinds)),
+        preserve_aspect_ratio=first_attr(links, "preserveAspectRatio", kinds),
+        transform=parse_transform(tr) if tr else Affine2D(),
+    )
+    # A representative color for stroke fallbacks: the first filled child.
+    for el in content.iter():
+        if el is content or not isinstance(el.tag, str):
+            continue
+        fill = style_of(el).get("fill")
+        color = parse_color(fill, default=None) if fill else None
+        if color not in (None, "none"):
+            pattern.color = color
+            break
+    return pattern
 
 
 def add_gradient_fill(
@@ -181,10 +359,10 @@ def add_gradient_fill(
 ):
     """Fill ``path`` (in ``transform`` coordinates) with ``gradient`` via an image.
 
-    The gradient is rendered as an RGBA image over the path's bounding box and
-    clipped to the path outline. ``transform`` defaults to ``ax.transData``.
-
-    Returns the created :class:`~matplotlib.image.AxesImage`.
+    The gradient is evaluated over the path's bounding box (also used as the
+    object bounding box) and clipped to the path outline. ``transform``
+    defaults to ``ax.transData``. Returns the created
+    :class:`~matplotlib.image.AxesImage`.
     """
     from matplotlib.patches import PathPatch
 
@@ -203,6 +381,5 @@ def add_gradient_fill(
     )
     im.set_transform(transform)
     clip = PathPatch(path, transform=transform, facecolor="none", edgecolor="none")
-    ax.add_patch(clip)
     im.set_clip_path(clip)
     return im

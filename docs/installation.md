@@ -8,13 +8,15 @@
 pip install svg2mpl
 ```
 
-This pulls in `matplotlib`, `numpy`, and `svgpath2mpl`.
+This pulls in `matplotlib`, `numpy`, and `pillow` (for embedded images).
 
 ### CSS `<style>`-block support
 
-Presentation attributes (`fill="red"`) and inline styles (`style="fill:red"`)
-work out of the box. To also resolve `<style>` blocks with CSS selectors and
-specificity, install the optional `css` extra:
+Presentation attributes (`fill="red"`), inline styles (`style="fill:red"`) and
+`<style>` blocks with simple selectors (type, `.class`, `#id`, attribute
+selectors, descendant/child combinators) work out of the box. For the full CSS
+selector grammar (pseudo-classes, sibling combinators ...), install the
+optional `css` extra:
 
 ```bash
 pip install "svg2mpl[css]"

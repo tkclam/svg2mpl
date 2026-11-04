@@ -4,12 +4,12 @@ Public API
 ----------
 - :func:`add_svg` -- render an SVG file (or markup string) onto a matplotlib axes.
 - :func:`load` / :func:`load_string` -- parse an SVG into a :class:`Scene`.
-- :class:`Scene`, :class:`Shape`, :class:`Text` -- the parsed representation.
+- :class:`Scene`, :class:`Shape`, :class:`Image`, :class:`Group`, :class:`Text`
+  -- the parsed representation.
 
-The renderer aims to be *faithful*: it honors element transforms, ``<g>``
-inheritance, ``viewBox``, the basic shape elements, and CSS (presentation
-attributes, inline ``style``, and -- with the ``css`` extra -- ``<style>``
-blocks).
+The renderer aims to be *faithful* to static SVG: transforms and viewports,
+CSS, gradients, patterns, clipping, masks, markers, text (as glyph outlines),
+images and filters are all honored.
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -23,7 +23,7 @@ from .render import (
     load_string,
     vectorize_dicts,
 )
-from .scene import Scene, Shape, Text
+from .scene import Group, Image, Scene, Shape, Text
 
 try:
     __version__ = version("svg2mpl")
@@ -36,6 +36,8 @@ __all__ = [
     "load_string",
     "Scene",
     "Shape",
+    "Image",
+    "Group",
     "Text",
     "get_bbox",
     "get_affine_matrix",
