@@ -11,7 +11,9 @@ from PIL import Image as PILImage
 import svg2mpl
 import svg2mpl.css as css
 from svg2mpl.geometry import flatten, path_extents
+from svg2mpl.pathdata import parse_path
 from svg2mpl.scene import Group, Image
+from svg2mpl.text import _PathMeasure
 
 NS = 'xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"'
 
@@ -437,3 +439,34 @@ def test_text_as_artists(ax):
         text_as_paths=False,
     )
     assert [t.get_text() for t in ax.texts] == ["Hi"]
+
+
+# --- regressions --------------------------------------------------------- #
+def test_text_path_ignores_gap_between_subpaths():
+
+    m = _PathMeasure(parse_path("M0 0 L50 0 M0 50 L50 50"))
+    assert m.length == pytest.approx(100)
+    (x, y), _angle = m.at(75)
+    assert (x, y) == pytest.approx((25, 50))
+
+
+def test_deeply_nested_styles_do_not_recurse():
+    depth = 3000
+    body = (
+        '<g fill="red">' * depth
+        + '<linearGradient id="g"><stop stop-color="currentColor"/></linearGradient>'
+        + "</g>" * depth
+    )
+    sc = scene(body + '<rect width="1" height="1" fill="url(#g)"/>')
+    assert sc.shapes
+
+
+def test_pattern_image_is_bounded(ax):
+    svg = (
+        f'<svg {NS} viewBox="0 0 100 100"><pattern id="p" width="0.5" height="0.5" '
+        'patternUnits="userSpaceOnUse"><rect width="0.25" height="0.5"/></pattern>'
+        '<rect width="100" height="100" fill="url(#p)"/></svg>'
+    )
+    svg2mpl.add_svg(svg, ax=ax, place=False, raster_resolution=8192)
+    h, w = ax.images[0].get_array().shape[:2]
+    assert h * w <= 4096**2

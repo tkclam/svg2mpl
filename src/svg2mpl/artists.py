@@ -31,8 +31,10 @@ def points_per_unit(transform, renderer, ref_point) -> float:
     p = transform.transform(np.array([[x, y], [x + eps, y], [x, y + eps]], float))
     jx, jy = p[1] - p[0], p[2] - p[0]
     det = abs(jx[0] * jy[1] - jx[1] * jy[0])
-    if not np.isfinite(det) or det <= 0:
-        return 0.0
+    if not np.isfinite(det):
+        return 1.0  # e.g. a log axis at x <= 0: keep strokes visible
+    if det <= 0:
+        return 0.0  # the drawing is collapsed to zero size
     px_per_unit = np.sqrt(det) / eps
     return float(px_per_unit / renderer.points_to_pixels(1.0))
 

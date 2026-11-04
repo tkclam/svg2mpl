@@ -410,15 +410,19 @@ class Renderer:
         m = tile.transform.get_matrix()
         sx = math.hypot(m[0, 0], m[1, 0]) * tile.width
         sy = math.hypot(m[0, 1], m[1, 1]) * tile.height
-        budget = MAX_RASTER_PX * 2
-        tw = min(max(2, math.ceil(sx * self.opts.density)), max(2, budget // ni))
-        th = min(max(2, math.ceil(sy * self.opts.density)), max(2, budget // nj))
+        tw = max(2, math.ceil(sx * self.opts.density))
+        th = max(2, math.ceil(sy * self.opts.density))
+        # Keep the tiled image within MAX_RASTER_PX**2 pixels in total.
+        shrink = math.sqrt(tw * ni * th * nj / MAX_RASTER_PX**2)
+        if shrink > 1:
+            tw, th = max(2, int(tw / shrink)), max(2, int(th / shrink))
         img = rasterize(tile.items, (0.0, 0.0, tile.width, tile.height), (th, tw))
         img[..., 3] *= opacity
-        big = np.tile(self._gray(img), (nj, ni, 1))
+        tile_img = np.clip(self._gray(img), 0, 1).astype(np.float32)
+        big = np.tile(tile_img, (nj, ni, 1))
         ox, oy = i0 * tile.width, j0 * tile.height
         self._add_image(
-            np.clip(big, 0, 1),
+            big,
             (ox, ox + ni * tile.width, oy + nj * tile.height, oy),
             to_doc=tile.transform,
             clip=outline,

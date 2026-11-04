@@ -78,7 +78,7 @@ def load_image(href: str, base_dir: str | None) -> np.ndarray | ET.Element:
             pass
     try:
         img = PILImage.open(io.BytesIO(data)).convert("RGBA")
-    except (UnidentifiedImageError, OSError) as exc:
+    except (UnidentifiedImageError, OSError, PILImage.DecompressionBombError) as exc:
         raise ImageError(f"could not decode image: {exc}") from exc
     return np.asarray(img)
 

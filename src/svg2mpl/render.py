@@ -22,7 +22,8 @@ import numpy as np
 from matplotlib.transforms import Affine2D, Bbox
 
 from ._draw import DrawOptions, Renderer, emit_collection, get_is_included, is_batchable
-from .geometry import Rect, path_extents, rect_intersection, rect_is_empty, rect_union
+from .clipping import clipped_extents
+from .geometry import Rect, rect_union
 from .parser import parse, parse_string
 from .scene import Group, Scene, Shape
 from .transform import compose, flip_y_transform
@@ -139,23 +140,11 @@ def _as_tuple(x: str | Iterable[str]) -> tuple[str, ...]:
     return (x,) if isinstance(x, str) else tuple(x)
 
 
-def _item_extents(item) -> Rect | None:
-    """Document-space extents of a drawable, limited by its clip."""
-    ext = path_extents(item.path)
-    if ext is None or item.clip is None:
-        return ext
-    clip_ext = path_extents(item.clip)
-    if clip_ext is None:
-        return None
-    ext = rect_intersection(ext, clip_ext)
-    return None if rect_is_empty(ext) else ext
-
-
 def _geometry_extents(items, exclude=(), bbox_exclude=()) -> Rect | None:
     box = None
     for item in items:
         if get_is_included(item.id, exclude) and get_is_included(item.id, bbox_exclude):
-            box = rect_union(box, _item_extents(item))
+            box = rect_union(box, clipped_extents(item))
     return box
 
 

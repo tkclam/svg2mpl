@@ -44,7 +44,13 @@ if TYPE_CHECKING:
 
     from .parser import Parser
 
-__all__ = ["any_overlap", "build_mask", "clip_region", "painted_extents"]
+__all__ = [
+    "any_overlap",
+    "build_mask",
+    "clip_region",
+    "clipped_extents",
+    "painted_extents",
+]
 
 
 def clip_region(
@@ -170,17 +176,13 @@ def build_mask(
     )
 
 
-def painted_extents(item) -> Rect | None:
-    """Document-space extents of a drawable, padded for its stroke and clipped."""
+def clipped_extents(item, pad: float = 0.0) -> Rect | None:
+    """Document-space extents of a drawable grown by ``pad``, limited by its
+    clip (``None`` when empty)."""
     ext = path_extents(item.path)
     if ext is None:
         return None
-    if isinstance(item, Shape) and item.kwargs.get("edgecolor", NONE) != NONE:
-        # Generous padding: miter joins can reach past half the stroke width.
-        pad = (
-            item.kwargs.get("linewidth", 0.0) / 2 * (1.5 if item.scale_stroke else 1.0)
-        )
-        ext = (ext[0] - pad, ext[1] - pad, ext[2] + pad, ext[3] + pad)
+    ext = (ext[0] - pad, ext[1] - pad, ext[2] + pad, ext[3] + pad)
     clip = getattr(item, "clip", None)
     if clip is not None:
         clip_ext = path_extents(clip)
@@ -190,6 +192,17 @@ def painted_extents(item) -> Rect | None:
         if rect_is_empty(ext):
             return None
     return ext
+
+
+def painted_extents(item) -> Rect | None:
+    """Like :func:`clipped_extents`, padded for the item's stroke."""
+    pad = 0.0
+    if isinstance(item, Shape) and item.kwargs.get("edgecolor", NONE) != NONE:
+        # Generous padding: miter joins can reach past half the stroke width.
+        pad = (
+            item.kwargs.get("linewidth", 0.0) / 2 * (1.5 if item.scale_stroke else 1.0)
+        )
+    return clipped_extents(item, pad)
 
 
 def any_overlap(boxes: list[Rect]) -> bool:

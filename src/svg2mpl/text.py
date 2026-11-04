@@ -448,12 +448,14 @@ class _PathMeasure:
     """Arc-length parameterization of a (flattened) path."""
 
     def __init__(self, path: Path):
-        # Subpaths are chained into one polyline (rings are not closed).
+        # Subpaths are chained; the jump between them (a moveto) has no length.
         rings = flatten(path)
         self.pts = np.vstack(rings) if rings else np.empty((0, 2))
         if len(self.pts) >= 2:
             seg = np.diff(self.pts, axis=0)
             self.seglen = np.hypot(seg[:, 0], seg[:, 1])
+            ends = np.cumsum([len(r) for r in rings])[:-1]
+            self.seglen[ends - 1] = 0.0  # segment from one ring's end to the next
             self.cum = np.concatenate([[0.0], np.cumsum(self.seglen)])
         else:
             self.seglen = np.empty(0)

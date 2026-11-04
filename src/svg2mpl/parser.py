@@ -172,12 +172,18 @@ class Parser:
 
     def style_of(self, el: ET.Element) -> dict:
         """The computed style of ``el`` in its document context."""
-        key = id(el)
-        if key not in self._style_cache:
-            parent = self.parent_of.get(key)
-            parent_style = self.style_of(parent) if parent is not None else None
-            self._style_cache[key] = compute_style(self.own_decls(el), parent_style)
-        return self._style_cache[key]
+        # Walk up to the nearest cached ancestor, then down (no recursion, so
+        # arbitrarily deep documents are fine).
+        chain = []
+        node = el
+        while node is not None and id(node) not in self._style_cache:
+            chain.append(node)
+            node = self.parent_of.get(id(node))
+        style = self._style_cache[id(node)] if node is not None else None
+        for node in reversed(chain):
+            style = compute_style(self.own_decls(node), style)
+            self._style_cache[id(node)] = style
+        return self._style_cache[id(el)]
 
     def transform_of(self, el: ET.Element) -> Affine2D:
         """The element's own transform (CSS ``transform`` beats the attribute)."""
